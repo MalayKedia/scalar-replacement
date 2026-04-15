@@ -378,7 +378,7 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
 
         if (baseObjs.size() > 1)
             for (AbstractObject o : baseObjs)
-                if (o != AbstractObject.NULL) state.localPointsToMultiple.add(o);
+                if (o != AbstractObject.NULL) out.localPointsToMultiple.add(o);
 
         for (AbstractObject o : baseObjs) {
             if (o == AbstractObject.NULL) continue;
