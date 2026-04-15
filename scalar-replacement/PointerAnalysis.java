@@ -372,9 +372,13 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
         SootField field = ref.getField();
         Set<AbstractObject> baseObjs = in.stack.getOrDefault(base, Collections.emptySet());
         Set<AbstractObject> rhsObjs  = resolve(rhs, in);
-
+        
         out.modified.addAll(baseObjs);
         boolean strong = baseObjs.size() == 1 && in.initialized.contains(base);
+
+        if (baseObjs.size() > 1)
+            for (AbstractObject o : baseObjs)
+                if (o != AbstractObject.NULL) state.localPointsToMultiple.add(o);
 
         for (AbstractObject o : baseObjs) {
             if (o == AbstractObject.NULL) continue;
