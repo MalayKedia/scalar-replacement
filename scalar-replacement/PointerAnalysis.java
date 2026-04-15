@@ -280,9 +280,17 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
         Local base = (Local) ref.getBase();
         SootField field = ref.getField();
         Set<AbstractObject> result = new HashSet<>();
+        int count =0;
         for (AbstractObject o : state.stack.getOrDefault(base, Collections.emptySet())) {
+            count ++;
             if (o == AbstractObject.NULL) continue;
             result.addAll(state.heap.getOrDefault(new HeapKey(o, field), Set.of(AbstractObject.NULL)));
+        }
+        if (count > 1) {
+            for (AbstractObject o : state.stack.getOrDefault(base, Collections.emptySet())) {
+                if (o == AbstractObject.NULL) continue;
+                state.localPointsToMultiple.add(o);
+            }
         }
         return result;
     }
@@ -432,7 +440,7 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
             int line = u.getJavaSourceStartLineNumber();
 
             String out = "O" + line + " = ";
-            if (!escaped && !modInCall) {
+            if (!escaped && !modInCall && !fin.localPointsToMultiple.contains(obj)) {
                 Set<Integer> sites = new TreeSet<>(
                     fin.callSites.getOrDefault(obj, Collections.emptySet()));
                 StringJoiner sj = new StringJoiner(",", "[", "]");

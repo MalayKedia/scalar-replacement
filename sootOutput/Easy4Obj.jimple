@@ -1,0 +1,15 @@
+class Easy4Obj extends java.lang.Object
+{
+    int x;
+
+    void <init>()
+    {
+        Easy4Obj r0;
+
+        r0 := @this: Easy4Obj;
+
+        specialinvoke r0.<java.lang.Object: void <init>()>();
+
+        return;
+    }
+}

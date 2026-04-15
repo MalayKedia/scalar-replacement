@@ -1,0 +1,34 @@
+class O extends java.lang.Object
+{
+
+    void <init>()
+    {
+        O r0;
+
+        r0 := @this: O;
+
+        specialinvoke r0.<java.lang.Object: void <init>()>();
+
+        return;
+    }
+
+    void foo(M)
+    {
+        java.io.PrintStream $r1;
+        int $i0;
+        M r0;
+        O r2;
+
+        r2 := @this: O;
+
+        r0 := @parameter0: M;
+
+        $r1 = <java.lang.System: java.io.PrintStream out>;
+
+        $i0 = r0.<M: int x>;
+
+        virtualinvoke $r1.<java.io.PrintStream: void println(int)>($i0);
+
+        return;
+    }
+}

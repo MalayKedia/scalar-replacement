@@ -1,0 +1,16 @@
+class M extends java.lang.Object
+{
+    int x;
+    int y;
+
+    void <init>()
+    {
+        M r0;
+
+        r0 := @this: M;
+
+        specialinvoke r0.<java.lang.Object: void <init>()>();
+
+        return;
+    }
+}

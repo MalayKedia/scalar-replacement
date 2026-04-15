@@ -14,7 +14,7 @@ import soot.Local;
  *                     through function calls (not direct stores in the current
  *                     method).  Direct stores are fine for scalar replacement;
  *                     only call-mediated writes prevent it.
- *
+ *MethodSummary
  * Additionally:
  *   initialized    — locals that have been definitely assigned on every path
  *                     reaching this point.  Used to decide strong vs. weak
@@ -32,6 +32,7 @@ public class AnalysisState {
     final Set<AbstractObject> modifiedInCalls            = new HashSet<>();
     final Set<Local> initialized                         = new HashSet<>();
     final Map<AbstractObject, Set<Integer>> callSites    = new HashMap<>();
+    final Set<AbstractObject> localPointsToMultiple      = new HashSet<>();
 
     /* ---- Deep copy ---- */
 
@@ -43,6 +44,7 @@ public class AnalysisState {
         modifiedInCalls.clear();
         initialized.clear();
         callSites.clear();
+        localPointsToMultiple.clear();
 
         src.stack.forEach((k, v) -> stack.put(k, new HashSet<>(v)));
         src.heap.forEach((k, v)  -> heap.put(k, new HashSet<>(v)));
@@ -50,6 +52,7 @@ public class AnalysisState {
         modified.addAll(src.modified);
         modifiedInCalls.addAll(src.modifiedInCalls);
         initialized.addAll(src.initialized);
+        localPointsToMultiple.addAll(src.localPointsToMultiple);
         src.callSites.forEach((k, v) -> callSites.put(k, new HashSet<>(v)));
     }
 
@@ -71,6 +74,7 @@ public class AnalysisState {
         out.modifiedInCalls.clear();
         out.initialized.clear();
         out.callSites.clear();
+        out.localPointsToMultiple.clear();
 
         // stack: union of points-to sets
         Set<Local> allLocals = new HashSet<>(a.stack.keySet());
@@ -95,6 +99,8 @@ public class AnalysisState {
         out.escaped.addAll(a.escaped);               out.escaped.addAll(b.escaped);
         out.modified.addAll(a.modified);              out.modified.addAll(b.modified);
         out.modifiedInCalls.addAll(a.modifiedInCalls); out.modifiedInCalls.addAll(b.modifiedInCalls);
+        out.localPointsToMultiple.addAll(a.localPointsToMultiple);
+        out.localPointsToMultiple.addAll(b.localPointsToMultiple);
 
         // initialized: intersection
         out.initialized.addAll(a.initialized);
@@ -122,12 +128,13 @@ public class AnalysisState {
             && modified.equals(s.modified)
             && modifiedInCalls.equals(s.modifiedInCalls)
             && initialized.equals(s.initialized)
-            && callSites.equals(s.callSites);
+            && callSites.equals(s.callSites)
+            && localPointsToMultiple.equals(s.localPointsToMultiple);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(stack, heap, escaped, modified,
-                            modifiedInCalls, initialized, callSites);
+                            modifiedInCalls, initialized, callSites, localPointsToMultiple);
     }
 }

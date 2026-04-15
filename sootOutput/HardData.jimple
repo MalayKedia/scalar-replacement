@@ -1,0 +1,15 @@
+class HardData extends java.lang.Object
+{
+    int x;
+
+    void <init>()
+    {
+        HardData r0;
+
+        r0 := @this: HardData;
+
+        specialinvoke r0.<java.lang.Object: void <init>()>();
+
+        return;
+    }
+}

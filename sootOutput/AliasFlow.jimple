@@ -1,0 +1,15 @@
+class AliasFlow extends java.lang.Object
+{
+    int val;
+
+    void <init>()
+    {
+        AliasFlow r0;
+
+        r0 := @this: AliasFlow;
+
+        specialinvoke r0.<java.lang.Object: void <init>()>();
+
+        return;
+    }
+}

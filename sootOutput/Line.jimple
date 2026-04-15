@@ -1,0 +1,44 @@
+class Line extends java.lang.Object
+{
+    static Point pGlobal;
+    Point p2;
+
+    public void <init>(Point, Point, Point)
+    {
+        Point r1, $r2, r3, $r4, $r5, r6;
+        Line r0;
+        double $d0, $d1;
+
+        r0 := @this: Line;
+
+        r1 := @parameter0: Point;
+
+        r3 := @parameter1: Point;
+
+        r6 := @parameter2: Point;
+
+        specialinvoke r0.<java.lang.Object: void <init>()>();
+
+        <Line: Point pGlobal> = r1;
+
+        $r2 = new Point;
+
+        specialinvoke $r2.<Point: void <init>()>();
+
+        r0.<Line: Point p2> = $r2;
+
+        $r4 = r0.<Line: Point p2>;
+
+        $d0 = r3.<Point: double x>;
+
+        $r4.<Point: double x> = $d0;
+
+        $r5 = r0.<Line: Point p2>;
+
+        $d1 = r3.<Point: double y>;
+
+        $r5.<Point: double y> = $d1;
+
+        return;
+    }
+}
