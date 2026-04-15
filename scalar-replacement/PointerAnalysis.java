@@ -32,6 +32,7 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
     private final Map<Unit, AllocObject>  allocObjects     = new HashMap<>();
     private final Map<Unit, ParamObject>  unitParamObjects = new HashMap<>(); // return vals & static loads
     private final Map<Integer, ParamObject> paramObjects   = new HashMap<>(); // method parameters
+    private final Map<HeapKey, ParamObject> fieldOfParam   = new HashMap<>(); // lazy field loads from params
 
     public PointerAnalysis(ExceptionalUnitGraph cfg, Body body, CallGraph cg,
                            Map<SootMethod, MethodSummary> summaries) {
@@ -149,6 +150,7 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
         // Collect summaries from every resolved call target
         Set<Integer> escParams = new HashSet<>();
         Set<Integer> modParams = new HashSet<>();
+        Set<Integer> reachModParams = new HashSet<>();
         Map<Integer, Set<Integer>> pCallSites = new HashMap<>();
 
         Iterator<Edge> edges = cg.edgesOutOf(stmt);
@@ -157,14 +159,15 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
             if (s == null) continue;
             escParams.addAll(s.escapingParams);
             modParams.addAll(s.modifiedParams);
+            reachModParams.addAll(s.reachableModifiedParams);
             s.paramCallSites.forEach((k, v) ->
                 pCallSites.computeIfAbsent(k, x -> new HashSet<>()).addAll(v));
         }
 
         int line = stmt.getJavaSourceStartLineNumber();
 
-        // Constructors: check escapes but skip call-site recording and modification tracking.
-        // Field writes inside <init> are expected and should not prevent scalar replacement.
+        // Constructors: check escapes and record call sites for arguments,
+        // but skip modification tracking (field writes in <init> are expected).
         if (isInit) {
             if (invoke instanceof InstanceInvokeExpr) {
                 Value base = ((InstanceInvokeExpr) invoke).getBase();
@@ -173,6 +176,19 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
                     if (escParams.contains(0))
                         for (AbstractObject o : pts) markEscaped(o, out);
                 }
+            }
+            List<Value> initArgs = invoke.getArgs();
+            for (int i = 0; i < initArgs.size(); i++) {
+                if (!(initArgs.get(i) instanceof Local)) continue;
+                int paramIdx = (invoke instanceof InstanceInvokeExpr) ? i + 1 : i;
+                Set<AbstractObject> pts = in.stack.getOrDefault(
+                    (Local) initArgs.get(i), Collections.emptySet());
+                for (AbstractObject o : pts) {
+                    addCallSite(o, line, out);
+                    addCallSites(o, pCallSites.getOrDefault(paramIdx, Collections.emptySet()), out);
+                }
+                if (escParams.contains(paramIdx))
+                    for (AbstractObject o : pts) markEscaped(o, out);
             }
             return;
         }
@@ -192,6 +208,12 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
                 if (modParams.contains(0)) {
                     out.modified.addAll(pts);
                     out.modifiedInCalls.addAll(pts);
+                }
+                if (reachModParams.contains(0)) {
+                    Set<AbstractObject> descendants = reachableFrom(pts, in.heap);
+                    descendants.removeAll(pts);
+                    out.modified.addAll(descendants);
+                    out.modifiedInCalls.addAll(descendants);
                 }
             }
         }
@@ -213,6 +235,12 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
             if (modParams.contains(paramIdx)) {
                 out.modified.addAll(pts);
                 out.modifiedInCalls.addAll(pts);
+            }
+            if (reachModParams.contains(paramIdx)) {
+                Set<AbstractObject> descendants = reachableFrom(pts, in.heap);
+                descendants.removeAll(pts);
+                out.modified.addAll(descendants);
+                out.modifiedInCalls.addAll(descendants);
             }
         }
     }
@@ -279,17 +307,27 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
     private Set<AbstractObject> loadField(InstanceFieldRef ref, AnalysisState state) {
         Local base = (Local) ref.getBase();
         SootField field = ref.getField();
+        Set<AbstractObject> baseObjs = state.stack.getOrDefault(base, Collections.emptySet());
         Set<AbstractObject> result = new HashSet<>();
-        int count =0;
-        for (AbstractObject o : state.stack.getOrDefault(base, Collections.emptySet())) {
-            count ++;
+
+        if (baseObjs.size() > 1)
+            for (AbstractObject o : baseObjs)
+                if (o != AbstractObject.NULL) state.localPointsToMultiple.add(o);
+
+        for (AbstractObject o : baseObjs) {
             if (o == AbstractObject.NULL) continue;
-            result.addAll(state.heap.getOrDefault(new HeapKey(o, field), Set.of(AbstractObject.NULL)));
-        }
-        if (count > 1) {
-            for (AbstractObject o : state.stack.getOrDefault(base, Collections.emptySet())) {
-                if (o == AbstractObject.NULL) continue;
-                state.localPointsToMultiple.add(o);
+            HeapKey key = new HeapKey(o, field);
+
+            if (state.heap.containsKey(key)) {
+                result.addAll(state.heap.get(key));
+            } else if (o instanceof ParamObject) {
+                // Field of an external object — materialize a stable escaped placeholder
+                ParamObject placeholder = fieldOfParam.computeIfAbsent(key, k -> new ParamObject());
+                markEscaped(placeholder, state);
+                state.heap.put(key, new HashSet<>(Set.of(placeholder)));
+                result.add(placeholder);
+            } else {
+                result.add(AbstractObject.NULL);
             }
         }
         return result;
@@ -301,7 +339,18 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
         Set<AbstractObject> result = new HashSet<>();
         for (AbstractObject o : state.stack.getOrDefault(base, Collections.emptySet())) {
             if (o == AbstractObject.NULL) continue;
-            result.addAll(state.heap.getOrDefault(HeapKey.arrayOf(o), Set.of(AbstractObject.NULL)));
+            HeapKey key = HeapKey.arrayOf(o);
+
+            if (state.heap.containsKey(key)) {
+                result.addAll(state.heap.get(key));
+            } else if (o instanceof ParamObject) {
+                ParamObject placeholder = fieldOfParam.computeIfAbsent(key, k -> new ParamObject());
+                markEscaped(placeholder, state);
+                state.heap.put(key, new HashSet<>(Set.of(placeholder)));
+                result.add(placeholder);
+            } else {
+                result.add(AbstractObject.NULL);
+            }
         }
         return result;
     }
@@ -334,7 +383,7 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
             if (strong) out.heap.put(key, new HashSet<>(rhsObjs));
             else        out.heap.computeIfAbsent(key, k -> new HashSet<>()).addAll(rhsObjs);
 
-            if (in.escaped.contains(o))
+            if (in.escaped.contains(o) || o instanceof ParamObject)
                 for (AbstractObject r : rhsObjs) markEscaped(r, out);
         }
     }
@@ -358,7 +407,7 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
             HeapKey key = HeapKey.arrayOf(o);
             out.heap.computeIfAbsent(key, k -> new HashSet<>()).addAll(rhsObjs);
 
-            if (in.escaped.contains(o))
+            if (in.escaped.contains(o) || o instanceof ParamObject)
                 for (AbstractObject r : rhsObjs) markEscaped(r, out);
         }
     }
@@ -377,6 +426,21 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
         if (v instanceof Local)        return state.stack.getOrDefault((Local) v, Collections.emptySet());
         if (v instanceof NullConstant) return Set.of(AbstractObject.NULL);
         return Collections.emptySet();
+    }
+
+    /** All objects reachable from {@code roots} via heap edges (includes roots). */
+    private Set<AbstractObject> reachableFrom(Set<AbstractObject> roots,
+                                              Map<HeapKey, Set<AbstractObject>> heap) {
+        Set<AbstractObject> visited = new HashSet<>(roots);
+        Deque<AbstractObject> work = new ArrayDeque<>(roots);
+        while (!work.isEmpty()) {
+            AbstractObject cur = work.poll();
+            for (var entry : heap.entrySet())
+                if (entry.getKey().base.equals(cur))
+                    for (AbstractObject child : entry.getValue())
+                        if (visited.add(child)) work.add(child);
+        }
+        return visited;
     }
 
     /** Transitively mark {@code obj} and everything reachable from it as escaped. */
@@ -466,6 +530,7 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
 
         Set<Integer> esc = new HashSet<>();
         Set<Integer> mod = new HashSet<>();
+        Set<Integer> reachMod = new HashSet<>();
         Map<Integer, Set<Integer>> cs = new HashMap<>();
         int idx = 0;
 
@@ -475,6 +540,9 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
             Set<AbstractObject> pts = fin.stack.getOrDefault(thisLocal, Collections.emptySet());
             if (!Collections.disjoint(fin.escaped, pts))  esc.add(idx);
             if (!Collections.disjoint(fin.modified, pts)) mod.add(idx);
+            Set<AbstractObject> descendants = reachableFrom(pts, fin.heap);
+            descendants.removeAll(pts);
+            if (!Collections.disjoint(fin.modified, descendants)) reachMod.add(idx);
             ParamObject p = paramObjects.get(idx);
             if (p != null)
                 cs.put(idx, new HashSet<>(fin.callSites.getOrDefault(p, Collections.emptySet())));
@@ -487,12 +555,15 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
             Set<AbstractObject> pts = fin.stack.getOrDefault(param, Collections.emptySet());
             if (!Collections.disjoint(fin.escaped, pts))  esc.add(idx);
             if (!Collections.disjoint(fin.modified, pts)) mod.add(idx);
+            Set<AbstractObject> descendants = reachableFrom(pts, fin.heap);
+            descendants.removeAll(pts);
+            if (!Collections.disjoint(fin.modified, descendants)) reachMod.add(idx);
             ParamObject p = paramObjects.get(idx);
             if (p != null)
                 cs.put(idx, new HashSet<>(fin.callSites.getOrDefault(p, Collections.emptySet())));
             idx++;
         }
 
-        return new MethodSummary(esc, mod, cs);
+        return new MethodSummary(esc, mod, reachMod, cs);
     }
 }
