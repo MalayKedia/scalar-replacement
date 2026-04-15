@@ -13,7 +13,6 @@ PROJECT_DIR="$(pwd)"
 SRC_DIR="$PROJECT_DIR/scalar-replacement"
 SOOT_JAR="$PROJECT_DIR/soot-4.6.0-jar-with-dependencies.jar"
 TESTCASE_DIR="$PROJECT_DIR/testcasesPA3"
-# EXPECTED_DIR="$PROJECT_DIR/testcasesPA3"
 BUILD_DIR="$SRC_DIR/build"
 
 # ── Compile ──────────────────────────────────────────────────────
@@ -35,27 +34,16 @@ fi
 # ── Run ──────────────────────────────────────────────────────────
 pass=0
 fail=0
-skip=0
 total=${#tests[@]}
 
 for tc in "${tests[@]}"; do
     printf "%-20s" "$tc"
 
-    if [ ! -d "$TESTCASE_DIR/$tc" ]; then
-        echo "SKIP  (no input directory)"
-        ((skip++))
-        continue
-    fi
-
     # Run analysis; capture stdout, suppress Soot's stderr noise
-    actual=$(cd "$PROJECT_DIR" && java -cp "$BUILD_DIR:$SOOT_JAR" PA3 "$tc" 2>/dev/null) || true
+    actual=$(cd "$PROJECT_DIR" && java -cp "$BUILD_DIR:$SOOT_JAR" PA3 "$TESTCASE_DIR/$tc" 2>/dev/null) || true
 
-    # Map testcase name to expected-output directory (test1 -> Test1, test12 -> Test12)
-    num="${tc#test}"
-    expected_dir="$TESTCASE_DIR/Test${num}"
-
-    if [ -f "$expected_dir/Test" ]; then
-        expected=$(cat "$expected_dir/Test")
+    if [ -f $TESTCASE_DIR/$tc"/Test" ]; then
+        expected=$(cat $TESTCASE_DIR/$tc"/Test")
         if [ "$actual" = "$expected" ]; then
             echo "PASS"
             ((pass++))
@@ -68,11 +56,10 @@ for tc in "${tests[@]}"; do
         # No expected output — just print what we got
         echo "RAN   (no expected output)"
         echo "$actual" | sed 's/^/    /'
-        ((skip++))
     fi
 done
 
 # ── Summary ──────────────────────────────────────────────────────
 echo ""
 echo "────────────────────────────────"
-echo "Total: $total   Pass: $pass   Fail: $fail   Skip: $skip"
+echo "Total: $total   Pass: $pass   Fail: $fail"
