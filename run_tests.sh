@@ -34,23 +34,29 @@ fi
 # ── Run ──────────────────────────────────────────────────────────
 pass=0
 fail=0
+skip=0
 total=${#tests[@]}
 
 for tc in "${tests[@]}"; do
     printf "%-20s" "$tc"
 
+    # Compile the testcase if needed
+    if [ -f "$TESTCASE_DIR/$tc/Test.java" ] && [ ! -f "$TESTCASE_DIR/$tc/Test.class" ]; then
+        javac "$TESTCASE_DIR/$tc/Test.java" 2>/dev/null || true
+    fi
+
     # Run analysis; capture stdout, suppress Soot's stderr noise
-    actual=$(cd "$PROJECT_DIR" && java -cp "$BUILD_DIR:$SOOT_JAR" PA3 "$TESTCASE_DIR/$tc" 2>/dev/null) || true
+    actual=$(cd "$PROJECT_DIR" && java -cp "$BUILD_DIR:$SOOT_JAR" PA3 "$TESTCASE_DIR/$tc" 2>/dev/null | grep -v "^Soot ") || true
 
     if [ -f $TESTCASE_DIR/$tc"/Test" ]; then
         expected=$(cat $TESTCASE_DIR/$tc"/Test")
         if [ "$actual" = "$expected" ]; then
             echo "PASS"
-            ((pass++))
+            ((pass++)) || true
         else
             echo "FAIL"
             diff --color=auto <(echo "$actual") <(echo "$expected") || true
-            ((fail++))
+            ((fail++)) || true
         fi
     else
         # No expected output — just print what we got

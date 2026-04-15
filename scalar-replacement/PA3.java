@@ -3,7 +3,7 @@ import soot.options.Options;
 
 public class PA3 {
     public static void main(String[] args) {
-        String classPath = "./testcases/" + args[0];
+        String classPath = args[0];
 
         Options.v().set_keep_line_number(true);
 

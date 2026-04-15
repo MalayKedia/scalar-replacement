@@ -163,6 +163,20 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
 
         int line = stmt.getJavaSourceStartLineNumber();
 
+        // Constructors: check escapes but skip call-site recording and modification tracking.
+        // Field writes inside <init> are expected and should not prevent scalar replacement.
+        if (isInit) {
+            if (invoke instanceof InstanceInvokeExpr) {
+                Value base = ((InstanceInvokeExpr) invoke).getBase();
+                if (base instanceof Local) {
+                    Set<AbstractObject> pts = in.stack.getOrDefault((Local) base, Collections.emptySet());
+                    if (escParams.contains(0))
+                        for (AbstractObject o : pts) markEscaped(o, out);
+                }
+            }
+            return;
+        }
+
         // Receiver (this) for instance invokes — param index 0
         if (invoke instanceof InstanceInvokeExpr) {
             Value base = ((InstanceInvokeExpr) invoke).getBase();
@@ -175,9 +189,7 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
                 }
                 if (escParams.contains(0))
                     for (AbstractObject o : pts) markEscaped(o, out);
-
-                // Constructor field-writes are expected — don't count as "modified in call"
-                if (!isInit && modParams.contains(0)) {
+                if (modParams.contains(0)) {
                     out.modified.addAll(pts);
                     out.modifiedInCalls.addAll(pts);
                 }
@@ -423,7 +435,9 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
             if (!escaped && !modInCall) {
                 Set<Integer> sites = new TreeSet<>(
                     fin.callSites.getOrDefault(obj, Collections.emptySet()));
-                out += "Y" + sites;
+                StringJoiner sj = new StringJoiner(",", "[", "]");
+                for (int s : sites) sj.add(String.valueOf(s));
+                out += "Y" + sj;
             } else {
                 out += "N";
             }
