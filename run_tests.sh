@@ -12,7 +12,7 @@ set -euo pipefail
 PROJECT_DIR="$(pwd)"
 SRC_DIR="$PROJECT_DIR/scalar-replacement"
 SOOT_JAR="$PROJECT_DIR/soot-4.6.0-jar-with-dependencies.jar"
-TESTCASE_DIR="$PROJECT_DIR/testcasesPA3"
+TESTCASE_DIR="$PROJECT_DIR/testcases_balaji"
 BUILD_DIR="$SRC_DIR/build"
 
 # ── Compile ──────────────────────────────────────────────────────

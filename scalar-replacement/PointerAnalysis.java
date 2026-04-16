@@ -522,6 +522,184 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
         return results;
     }
 
+    /* =============================================================
+     *  Scalar Replacement Transformation (no-callsite objects only)
+     * ============================================================= */
+
+    /**
+     * Perform scalar replacement for objects that are scalar-replaceable
+     * and have NO call sites (i.e., Y[]).
+     *
+     * For each such object:
+     *   - Remove the {@code new} allocation statement.
+     *   - Remove the {@code <init>} constructor call.
+     *   - Replace field stores ({@code base.field = rhs}) with assignments
+     *     to a fresh scalar local named {@code varName_ClassName_fieldName}.
+     *   - Replace field loads ({@code lhs = base.field}) with reads from
+     *     the corresponding scalar local.
+     */
+    void performScalarReplacement() {
+        AnalysisState fin = getFinalState();
+
+        // Step 1: Identify scalar-replaceable objects with no call sites
+        Map<AllocObject, Unit> noCallSiteObjects = new LinkedHashMap<>();
+        for (Unit u : body.getUnits()) {
+            if (!(u instanceof AssignStmt)) continue;
+            AssignStmt assign = (AssignStmt) u;
+            if (!(assign.getRightOp() instanceof AnyNewExpr)) continue;
+            if (!(assign.getRightOp() instanceof NewExpr)) continue; // skip arrays
+
+            AllocObject obj = allocObjects.get(u);
+            if (obj == null) continue;
+
+            if (fin.escaped.contains(obj)) continue;
+            if (fin.modifiedInCalls.contains(obj)) continue;
+            if (fin.localPointsToMultiple.contains(obj)) continue;
+
+            Set<Integer> sites = fin.callSites.getOrDefault(obj, Collections.emptySet());
+            if (!sites.isEmpty()) continue;
+
+            noCallSiteObjects.put(obj, u);
+        }
+
+        if (noCallSiteObjects.isEmpty()) return;
+
+        // Step 2: For each object, record the variable name and class name
+        Map<AllocObject, String> varNames = new HashMap<>();
+        Map<AllocObject, String> classNames = new HashMap<>();
+
+        for (Map.Entry<AllocObject, Unit> entry : noCallSiteObjects.entrySet()) {
+            AllocObject obj = entry.getKey();
+            AssignStmt allocStmt = (AssignStmt) entry.getValue();
+            Local allocLocal = (Local) allocStmt.getLeftOp();
+            NewExpr newExpr = (NewExpr) allocStmt.getRightOp();
+
+            varNames.put(obj, allocLocal.getName());
+            classNames.put(obj, newExpr.getBaseType().getSootClass().getShortName());
+        }
+
+        // Step 3: First pass — collect all accessed fields and create scalar locals
+        Map<AllocObject, Map<SootField, Local>> fieldLocals = new HashMap<>();
+        for (AllocObject obj : noCallSiteObjects.keySet())
+            fieldLocals.put(obj, new HashMap<>());
+
+        for (Unit u : body.getUnits()) {
+            if (!(u instanceof AssignStmt)) continue;
+            AssignStmt assign = (AssignStmt) u;
+
+            collectFieldLocal(assign.getLeftOp(), u, noCallSiteObjects, varNames,
+                              classNames, fieldLocals);
+            collectFieldLocal(assign.getRightOp(), u, noCallSiteObjects, varNames,
+                              classNames, fieldLocals);
+        }
+
+        // Step 4: Second pass — rewrite field accesses, mark allocations/inits for removal
+        List<Unit> toRemove = new ArrayList<>();
+
+        for (Unit u : body.getUnits()) {
+            Stmt stmt = (Stmt) u;
+
+            // Mark allocation statements for removal
+            if (u instanceof AssignStmt) {
+                AssignStmt assign = (AssignStmt) u;
+                if (assign.getRightOp() instanceof NewExpr) {
+                    AllocObject obj = allocObjects.get(u);
+                    if (obj != null && noCallSiteObjects.containsKey(obj)) {
+                        toRemove.add(u);
+                        continue;
+                    }
+                }
+
+                // Rewrite field stores: base.field = rhs  -->  scalarLocal = rhs
+                if (assign.getLeftOp() instanceof InstanceFieldRef) {
+                    InstanceFieldRef ref = (InstanceFieldRef) assign.getLeftOp();
+                    AllocObject target = resolveUniqueAllocTarget(
+                        (Local) ref.getBase(), u, noCallSiteObjects.keySet());
+                    if (target != null) {
+                        Local scalarLocal = fieldLocals.get(target).get(ref.getField());
+                        if (scalarLocal != null) {
+                            assign.setLeftOp(scalarLocal);
+                        }
+                    }
+                }
+
+                // Rewrite field loads: lhs = base.field  -->  lhs = scalarLocal
+                if (assign.getRightOp() instanceof InstanceFieldRef) {
+                    InstanceFieldRef ref = (InstanceFieldRef) assign.getRightOp();
+                    AllocObject target = resolveUniqueAllocTarget(
+                        (Local) ref.getBase(), u, noCallSiteObjects.keySet());
+                    if (target != null) {
+                        Local scalarLocal = fieldLocals.get(target).get(ref.getField());
+                        if (scalarLocal != null) {
+                            assign.setRightOp(scalarLocal);
+                        }
+                    }
+                }
+            }
+
+            // Mark <init> calls on scalar-replaced objects for removal
+            if (stmt.containsInvokeExpr()
+                    && stmt.getInvokeExpr() instanceof SpecialInvokeExpr) {
+                SpecialInvokeExpr invoke = (SpecialInvokeExpr) stmt.getInvokeExpr();
+                if (invoke.getMethod().getName().equals("<init>")) {
+                    Local base = (Local) invoke.getBase();
+                    AllocObject target = resolveUniqueAllocTarget(
+                        base, u, noCallSiteObjects.keySet());
+                    if (target != null) {
+                        toRemove.add(u);
+                    }
+                }
+            }
+        }
+
+        // Step 5: Remove dead statements
+        for (Unit u : toRemove) {
+            body.getUnits().remove(u);
+        }
+    }
+
+    /**
+     * If {@code value} is an {@link InstanceFieldRef} whose base local points
+     * to exactly one object in {@code candidates}, create (or reuse) a scalar
+     * local named {@code varName_className_fieldName} and register it.
+     */
+    private void collectFieldLocal(Value value, Unit unit,
+                                   Map<AllocObject, Unit> candidates,
+                                   Map<AllocObject, String> varNames,
+                                   Map<AllocObject, String> classNames,
+                                   Map<AllocObject, Map<SootField, Local>> fieldLocals) {
+        if (!(value instanceof InstanceFieldRef)) return;
+        InstanceFieldRef ref = (InstanceFieldRef) value;
+        Local base = (Local) ref.getBase();
+
+        AllocObject target = resolveUniqueAllocTarget(base, unit, candidates.keySet());
+        if (target == null) return;
+
+        SootField field = ref.getField();
+        fieldLocals.get(target).computeIfAbsent(field, f -> {
+            String name = varNames.get(target) + "_" + classNames.get(target) + "_" + f.getName();
+            Local scalarLocal = Jimple.v().newLocal(name, f.getType());
+            body.getLocals().add(scalarLocal);
+            return scalarLocal;
+        });
+    }
+
+    /**
+     * Check the analysis state before {@code unit}: if {@code base} points to
+     * exactly one {@link AllocObject} that is in {@code candidates}, return it.
+     */
+    private AllocObject resolveUniqueAllocTarget(Local base, Unit unit,
+                                                 Set<AllocObject> candidates) {
+        AnalysisState flowBefore = getFlowBefore(unit);
+        Set<AbstractObject> pts = flowBefore.stack.getOrDefault(base, Collections.emptySet());
+        if (pts.size() != 1) return null;
+
+        AbstractObject single = pts.iterator().next();
+        if (single instanceof AllocObject && candidates.contains(single))
+            return (AllocObject) single;
+        return null;
+    }
+
     /**
      * Produce the inter-procedural summary for this method.
      *

@@ -19,6 +19,9 @@ public class AnalysisTransformer extends SceneTransformer {
     private final Map<SootMethod, MethodSummary> summaries = new HashMap<>();
     private final Map<Integer, String> results = new TreeMap<>();
 
+    /** When false, skip the scalar replacement transformation (used for baseline benchmarks). */
+    boolean enableTransformation = true;
+
     @Override
     protected void internalTransform(String phaseName, Map<String, String> options) {
         CallGraph cg = Scene.v().getCallGraph();
@@ -58,5 +61,9 @@ public class AnalysisTransformer extends SceneTransformer {
         // Store summary for callers, collect scalar-replacement results
         summaries.put(method, analysis.computeSummary());
         results.putAll(analysis.getScalarReplacementResults());
+
+        // Transform: scalar-replace objects with no call sites
+        if (enableTransformation)
+            analysis.performScalarReplacement();
     }
 }
