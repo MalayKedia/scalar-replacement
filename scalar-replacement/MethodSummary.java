@@ -1,5 +1,6 @@
 import java.util.*;
 import soot.SootField;
+import soot.SootMethod;
 
 /**
  * Phase-1 summary of a method, indexed by parameter.
@@ -41,6 +42,24 @@ public class MethodSummary {
     /** Fields of param i read (directly or transitively via good callees). */
     final Map<Integer, Set<SootField>> readFields             = new HashMap<>();
 
+    /**
+     * Like {@link #calleeModifiedFields} but excluding contributions from
+     * super.&lt;init&gt; / this.&lt;init&gt; delegated-constructor calls (only
+     * meaningful for constructors; identical to calleeModifiedFields for
+     * non-constructors). Phase 2 uses this to check that a constructor's
+     * body has no non-chain helper call that writes fields — such a helper
+     * would require writing modified scalars back at the call site, which
+     * our specialization doesn't support.
+     */
+    final Map<Integer, Set<SootField>> nonChainCalleeModifiedFields = new HashMap<>();
+
+    /**
+     * For constructors: the target of the super.&lt;init&gt; / this.&lt;init&gt;
+     * call in this constructor's body, or null if none. Phase 2 walks this
+     * pointer to validate the whole constructor chain.
+     */
+    SootMethod chainInitTarget = null;
+
     public MethodSummary(int paramCount) {
         this.paramCount = paramCount;
     }
@@ -62,6 +81,10 @@ public class MethodSummary {
 
     Set<SootField> read(int i) {
         return readFields.getOrDefault(i, Collections.emptySet());
+    }
+
+    Set<SootField> nonChainCalleeModified(int i) {
+        return nonChainCalleeModifiedFields.getOrDefault(i, Collections.emptySet());
     }
 
     /**

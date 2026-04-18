@@ -32,6 +32,12 @@ public class AnalysisTransformer extends SceneTransformer {
     protected void internalTransform(String phaseName, Map<String, String> options) {
         CallGraph cg = Scene.v().getCallGraph();
 
+        // Object.<init> is library code but semantically a no-op — it neither
+        // escapes nor modifies this. Without this override, every user
+        // constructor's super call would resolve to allBad and poison the
+        // whole chain, making goodParams[0] forever false on constructors.
+        installObjectInitSummary();
+
         Set<SootMethod> reachable = collectReachable(cg);
         List<List<SootMethod>> sccs = tarjan(reachable, cg);
 
@@ -52,7 +58,33 @@ public class AnalysisTransformer extends SceneTransformer {
             }
         }
 
+        // Phase 2: per-method scalar-replaceable allocation analysis.
+        Map<SootMethod, List<ReplaceableAlloc>> perMethodAllocs = new LinkedHashMap<>();
+        for (List<SootMethod> scc : sccs) {
+            for (SootMethod m : scc) {
+                if (!m.isConcrete()) continue;
+                try {
+                    AllocationAnalysis aa = new AllocationAnalysis(
+                        m.getActiveBody(), cg, summaries);
+                    List<ReplaceableAlloc> rs = aa.getReplaceableAllocs();
+                    if (!rs.isEmpty()) perMethodAllocs.put(m, rs);
+                } catch (Exception ignored) { }
+            }
+        }
+
         printSummaries();
+        printAllocs(perMethodAllocs);
+    }
+
+    private void installObjectInitSummary() {
+        try {
+            SootClass objectClass = Scene.v().getSootClass("java.lang.Object");
+            SootMethod objectInit = objectClass.getMethod(
+                "<init>", Collections.emptyList(), VoidType.v());
+            MethodSummary s = new MethodSummary(1);
+            s.goodParams.add(0);
+            summaries.put(objectInit, s);
+        } catch (Exception ignored) { }
     }
 
     /* =============================================================
@@ -171,5 +203,30 @@ public class AnalysisTransformer extends SceneTransformer {
         List<Integer> l = new ArrayList<>(s);
         Collections.sort(l);
         return l;
+    }
+
+    private void printAllocs(Map<SootMethod, List<ReplaceableAlloc>> perMethodAllocs) {
+        if (perMethodAllocs.isEmpty()) {
+            System.out.println("\n=== Phase 2: no scalar-replaceable allocations ===");
+            return;
+        }
+        System.out.println("\n=== Phase 2: replaceable allocations ===");
+        for (Map.Entry<SootMethod, List<ReplaceableAlloc>> e : perMethodAllocs.entrySet()) {
+            System.out.println(e.getKey().getSignature());
+            for (ReplaceableAlloc ra : e.getValue()) {
+                int line = ra.site.getJavaSourceStartLineNumber();
+                System.out.println("  line " + line + ": new " + ra.allocClass.getShortName()
+                    + "  fields=" + ra.fieldsUsed
+                    + "  chain=" + chainStr(ra.initChain)
+                    + "  helperCalls=" + ra.helperCallSites.size());
+            }
+        }
+    }
+
+    private static String chainStr(List<SootMethod> chain) {
+        StringJoiner sj = new StringJoiner(" -> ");
+        for (SootMethod m : chain)
+            sj.add(m.getDeclaringClass().getShortName() + ".<init>");
+        return sj.toString();
     }
 }

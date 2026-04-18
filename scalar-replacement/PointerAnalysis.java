@@ -260,6 +260,7 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
     private void handleInvoke(Stmt stmt, AnalysisState in) {
         InvokeExpr invoke = stmt.getInvokeExpr();
         List<MethodSummary> callees = getCalleeSummaries(stmt);
+        boolean isChainInit = isChainInitCall(stmt);
 
         List<Value> actuals = new ArrayList<>();
         boolean isInstance = invoke instanceof InstanceInvokeExpr;
@@ -294,20 +295,52 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
                 }
             }
 
+            // Chain init calls contribute to calleeModifiedFields on position 0
+            // (this's receiver) but NOT to nonChainCalleeModifiedFields. Other
+            // positions are treated as regular forwarded args even on chain-init.
+            boolean isChainContribution = isChainInit && i == 0;
+
             for (int p : tags) {
                 if (escapingInAny) result.escapingParams.add(p);
                 if (identityInAny) result.identityUsedParams.add(p);
                 if (!goodInAllTargets) result.forwardedBadParams.add(p);
-                if (!modAt.isEmpty())
+                if (!modAt.isEmpty()) {
                     result.calleeModifiedFields
                         .computeIfAbsent(p, k -> new HashSet<>())
                         .addAll(modAt);
+                    if (!isChainContribution) {
+                        result.nonChainCalleeModifiedFields
+                            .computeIfAbsent(p, k -> new HashSet<>())
+                            .addAll(modAt);
+                    }
+                }
                 if (!readAt.isEmpty())
                     result.readFields
                         .computeIfAbsent(p, k -> new HashSet<>())
                         .addAll(readAt);
             }
         }
+
+        if (isChainInit && result.chainInitTarget == null) {
+            try {
+                result.chainInitTarget = invoke.getMethod();
+            } catch (Exception ignored) { /* phantom */ }
+        }
+    }
+
+    /**
+     * True if {@code stmt} is a super.&lt;init&gt; / this.&lt;init&gt; call
+     * within a constructor body — i.e., a specialinvoke with name &lt;init&gt;
+     * whose receiver is the enclosing method's {@code this} local.
+     */
+    private boolean isChainInitCall(Stmt stmt) {
+        if (method.isStatic()) return false;
+        if (!method.getName().equals("<init>")) return false;
+        InvokeExpr invoke = stmt.getInvokeExpr();
+        if (!(invoke instanceof SpecialInvokeExpr)) return false;
+        if (!invoke.getMethodRef().name().equals("<init>")) return false;
+        Value base = ((SpecialInvokeExpr) invoke).getBase();
+        return base instanceof Local && base.equals(body.getThisLocal());
     }
 
     private Set<Integer> computeReturnAlias(InvokeExpr invoke, AnalysisState in,
