@@ -60,6 +60,7 @@ public class AnalysisTransformer extends SceneTransformer {
 
         // Phase 2: per-method scalar-replaceable allocation analysis.
         Map<SootMethod, List<ReplaceableAlloc>> perMethodAllocs = new LinkedHashMap<>();
+        Map<SootMethod, AllocationAnalysis> perMethodAnalysis = new LinkedHashMap<>();
         for (List<SootMethod> scc : sccs) {
             for (SootMethod m : scc) {
                 if (!m.isConcrete()) continue;
@@ -67,12 +68,31 @@ public class AnalysisTransformer extends SceneTransformer {
                     AllocationAnalysis aa = new AllocationAnalysis(
                         m.getActiveBody(), cg, summaries);
                     List<ReplaceableAlloc> rs = aa.getReplaceableAllocs();
-                    if (!rs.isEmpty()) perMethodAllocs.put(m, rs);
+                    if (!rs.isEmpty()) {
+                        perMethodAllocs.put(m, rs);
+                        perMethodAnalysis.put(m, aa);
+                    }
                 } catch (Exception ignored) { }
             }
         }
 
         printYResults(perMethodAllocs);
+
+        // Phase 3: IR transformation.
+        if (enableTransformation) {
+            Specializer specializer = new Specializer(summaries);
+            Phase3Transformer p3 = new Phase3Transformer(specializer);
+            for (Map.Entry<SootMethod, List<ReplaceableAlloc>> e
+                    : perMethodAllocs.entrySet()) {
+                try {
+                    p3.transform(e.getKey(), e.getValue(),
+                                 perMethodAnalysis.get(e.getKey()));
+                } catch (Exception ex) {
+                    System.err.println("Phase 3 failed for " + e.getKey()
+                        + ": " + ex);
+                }
+            }
+        }
     }
 
     private void installObjectInitSummary() {

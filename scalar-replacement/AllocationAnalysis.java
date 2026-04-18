@@ -56,6 +56,9 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
      * disqualification pass and have a valid {@code <init>} chain, and
      * finalize their fieldsUsed from chain summaries.
      */
+    /** Expose the per-unit IN state for Phase 3 rewriting. */
+    public AllocState stateBefore(Unit u) { return getFlowBefore(u); }
+
     public List<ReplaceableAlloc> getReplaceableAllocs() {
         List<ReplaceableAlloc> r = new ArrayList<>();
         for (Map.Entry<Unit, ReplaceableAlloc> e : allocs.entrySet()) {
