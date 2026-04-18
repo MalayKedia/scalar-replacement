@@ -10,5 +10,7 @@ public class Test {
         }
         b = new A();
         b.f = 10;
+        System.out.println(b.f);
     }
+
 }
