@@ -6,7 +6,6 @@ class A{
         counter++;
     }
 }
-
 class B{
     static A globl;
     void foo(A a){
@@ -18,9 +17,9 @@ class B{
 
 public class Test {
     public static void main(String[] args) {
-        A aa = new A();
-        B b = new B();
-        A c = new A();
+        A aa = new A();     //O20 (??) 
+        B b = new B();      //O21 partially replacable
+        A c = new A();      //O22 (??)
 
         aa.f = 5;
         b.foo(aa);
