@@ -12,7 +12,7 @@ set -euo pipefail
 PROJECT_DIR="$(pwd)"
 SRC_DIR="$PROJECT_DIR/scalar-replacement"
 SOOT_JAR="$PROJECT_DIR/soot-4.6.0-jar-with-dependencies.jar"
-TESTCASE_DIR="$PROJECT_DIR/testcases_balaji"
+TESTCASE_DIR="$PROJECT_DIR/testcases_sound"
 BUILD_DIR="$SRC_DIR/build"
 
 # ── Compile ──────────────────────────────────────────────────────
@@ -25,10 +25,10 @@ echo ""
 if [ $# -gt 0 ]; then
     tests=("$@")
 else
-    tests=()
-    for d in "$TESTCASE_DIR"/*/; do
-        tests+=("$(basename "$d")")
-    done
+    mapfile -t tests < <(
+        find "$TESTCASE_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
+        | sort -V
+    )
 fi
 
 # ── Run ──────────────────────────────────────────────────────────

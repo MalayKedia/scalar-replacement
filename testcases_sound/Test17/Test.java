@@ -7,14 +7,14 @@ class N extends M {
     System.out.println(mm.x);
   }
 }
+
 class O extends N{
     int x;
+    
     void bar(M mm) {
         mm.x = 112;
     }
 }
-
-
 
 public class Test {
     public static void main(String[] args) {
