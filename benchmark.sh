@@ -6,12 +6,9 @@
 # Usage:  ./benchmark.sh <TestDir>
 #   e.g.  ./benchmark.sh testcases_balaji/Test1
 #
-# What it does:
-#   1. Compiles the analysis + PA3Benchmark entry point.
-#   2. Compiles the test case's .java if needed.
-#   3. Runs Soot WITHOUT transformation  → baseline .class files.
-#   4. Runs Soot WITH transformation     → optimized .class files.
-#   5. Executes both and reports wall-clock times.
+# Outputs:
+#   benchmark_baseline/   — .class and .jimple files WITHOUT transformation
+#   benchmark_optimized/  — .class and .jimple files WITH transformation
 
 set -euo pipefail
 
@@ -27,9 +24,8 @@ SOOT_JAR="$PROJECT_DIR/soot-4.6.0-jar-with-dependencies.jar"
 BUILD_DIR="$SRC_DIR/build"
 TESTCASE_DIR="$PROJECT_DIR/$1"
 
-BASELINE_DIR=$(mktemp -d)
-OPTIMIZED_DIR=$(mktemp -d)
-trap 'rm -rf "$BASELINE_DIR" "$OPTIMIZED_DIR"' EXIT
+BASELINE_DIR="$PROJECT_DIR/benchmark_baseline"
+OPTIMIZED_DIR="$PROJECT_DIR/benchmark_optimized"
 
 ITERATIONS=5
 # Use -Xint (interpreter only) so the JVM's own JIT escape analysis
@@ -43,42 +39,52 @@ javac -d "$BUILD_DIR" -cp "$SOOT_JAR" "$SRC_DIR"/*.java
 echo ""
 
 # ── Step 2: Compile test case if needed ─────────────────────────
-if [ -f "$TESTCASE_DIR/Test.java" ]; then
-    echo "=== Compiling test case ==="
-    javac "$TESTCASE_DIR/Test.java" 2>/dev/null || true
-    echo ""
-fi
+for f in "$TESTCASE_DIR"/*.java; do
+    [ -f "$f" ] || continue
+    echo "=== Compiling $f ==="
+    javac "$f" 2>/dev/null || true
+done
+echo ""
 
-# ── Step 3: Soot pass — baseline (no transformation) ───────────
+# ── Step 3: Clean output dirs ──────────────────────────────────
+rm -rf "$BASELINE_DIR" "$OPTIMIZED_DIR"
+mkdir -p "$BASELINE_DIR" "$OPTIMIZED_DIR"
+
+# ── Step 4: Soot pass — baseline (no transformation) ───────────
+#    Run twice: once for class files, once for Jimple, into the same dir.
 echo "=== Running Soot (baseline, no transformation) ==="
-java -cp "$BUILD_DIR:$SOOT_JAR" PA3Benchmark "$TESTCASE_DIR" "$BASELINE_DIR" --no-transform 2>/dev/null | grep -v "^Soot \|^O[0-9]" || true
+java -cp "$BUILD_DIR:$SOOT_JAR" PA3Benchmark "$TESTCASE_DIR" "$BASELINE_DIR" --no-transform --format c 2>/dev/null | grep -v "^Soot \|^O[0-9]" || true
+java -cp "$BUILD_DIR:$SOOT_JAR" PA3Benchmark "$TESTCASE_DIR" "$BASELINE_DIR" --no-transform --format J 2>/dev/null | grep -v "^Soot \|^O[0-9]" || true
 echo "  Output in: $BASELINE_DIR"
+ls "$BASELINE_DIR"/ | sed 's/^/    /'
 echo ""
 
-# ── Step 4: Soot pass — optimized (with scalar replacement) ────
+# ── Step 5: Soot pass — optimized (with scalar replacement) ────
 echo "=== Running Soot (optimized, with scalar replacement) ==="
-java -cp "$BUILD_DIR:$SOOT_JAR" PA3Benchmark "$TESTCASE_DIR" "$OPTIMIZED_DIR" 2>/dev/null | grep -v "^Soot \|^O[0-9]" || true
+java -cp "$BUILD_DIR:$SOOT_JAR" PA3Benchmark "$TESTCASE_DIR" "$OPTIMIZED_DIR" --format c 2>/dev/null | grep -v "^Soot \|^O[0-9]" || true
+java -cp "$BUILD_DIR:$SOOT_JAR" PA3Benchmark "$TESTCASE_DIR" "$OPTIMIZED_DIR" --format J 2>/dev/null | grep -v "^Soot \|^O[0-9]" || true
 echo "  Output in: $OPTIMIZED_DIR"
+ls "$OPTIMIZED_DIR"/ | sed 's/^/    /'
 echo ""
 
-# ── Step 5: Show Jimple diff ────────────────────────────────────
+# ── Step 6: Show Jimple diff ────────────────────────────────────
 echo "=== Jimple diff (baseline vs optimized) for Test class ==="
-
-echo "(Checking that optimized class files differ from baseline)"
 if diff -q "$BASELINE_DIR/Test.class" "$OPTIMIZED_DIR/Test.class" > /dev/null 2>&1; then
     echo "  No difference in Test.class (test may not have Y[] objects)"
 else
     echo "  Test.class files differ — transformation applied!"
 fi
 echo ""
+echo "--- Test.jimple diff ---"
+diff --color=auto "$BASELINE_DIR/Test.jimple" "$OPTIMIZED_DIR/Test.jimple" || true
+echo ""
 
-# ── Step 6: Benchmark execution ─────────────────────────────────
+# ── Step 7: Benchmark execution ─────────────────────────────────
 echo "=== Benchmarking ($ITERATIONS iterations each) ==="
 echo ""
 
 # Warmup + time baseline
 echo "--- Baseline (unoptimized) ---"
-# Warmup
 java $JVM_FLAGS -cp "$BASELINE_DIR" Test > /dev/null 2>&1 || true
 
 baseline_total=0
@@ -96,7 +102,6 @@ echo ""
 
 # Warmup + time optimized
 echo "--- Optimized (scalar replacement) ---"
-# Warmup
 java $JVM_FLAGS -cp "$OPTIMIZED_DIR" Test > /dev/null 2>&1 || true
 
 optimized_total=0
@@ -112,14 +117,13 @@ optimized_avg=$((optimized_total / ITERATIONS))
 echo "  Average: ${optimized_avg} ms"
 echo ""
 
-# ── Step 7: Summary ─────────────────────────────────────────────
+# ── Step 8: Summary ─────────────────────────────────────────────
 echo "=== Summary ==="
 echo "  Baseline avg:  ${baseline_avg} ms"
 echo "  Optimized avg: ${optimized_avg} ms"
 if [ "$baseline_avg" -gt 0 ]; then
     diff_ms=$((baseline_avg - optimized_avg))
     echo "  Difference:    ${diff_ms} ms"
-    # Integer percentage
     pct=$((diff_ms * 100 / baseline_avg))
     echo "  Speedup:       ${pct}%"
 else
