@@ -53,16 +53,16 @@ mkdir -p "$BASELINE_DIR" "$OPTIMIZED_DIR"
 # ── Step 4: Soot pass — baseline (no transformation) ───────────
 #    Run twice: once for class files, once for Jimple, into the same dir.
 echo "=== Running Soot (baseline, no transformation) ==="
-java -cp "$BUILD_DIR:$SOOT_JAR" PA3Benchmark "$TESTCASE_DIR" "$BASELINE_DIR" --no-transform --format c 2>/dev/null | grep -v "^Soot \|^O[0-9]" || true
-java -cp "$BUILD_DIR:$SOOT_JAR" PA3Benchmark "$TESTCASE_DIR" "$BASELINE_DIR" --no-transform --format J 2>/dev/null | grep -v "^Soot \|^O[0-9]" || true
+java -cp "$BUILD_DIR:$SOOT_JAR" SootRunner "$TESTCASE_DIR" "$BASELINE_DIR" --no-transform --format c 2>/dev/null | grep -v "^Soot \|^O[0-9]" || true
+java -cp "$BUILD_DIR:$SOOT_JAR" SootRunner "$TESTCASE_DIR" "$BASELINE_DIR" --no-transform --format J 2>/dev/null | grep -v "^Soot \|^O[0-9]" || true
 echo "  Output in: $BASELINE_DIR"
 ls "$BASELINE_DIR"/ | sed 's/^/    /'
 echo ""
 
 # ── Step 5: Soot pass — optimized (with scalar replacement) ────
 echo "=== Running Soot (optimized, with scalar replacement) ==="
-java -cp "$BUILD_DIR:$SOOT_JAR" PA3Benchmark "$TESTCASE_DIR" "$OPTIMIZED_DIR" --format c 2>/dev/null | grep -v "^Soot \|^O[0-9]" || true
-java -cp "$BUILD_DIR:$SOOT_JAR" PA3Benchmark "$TESTCASE_DIR" "$OPTIMIZED_DIR" --format J 2>/dev/null | grep -v "^Soot \|^O[0-9]" || true
+java -cp "$BUILD_DIR:$SOOT_JAR" SootRunner "$TESTCASE_DIR" "$OPTIMIZED_DIR" --format c 2>/dev/null | grep -v "^Soot \|^O[0-9]" || true
+java -cp "$BUILD_DIR:$SOOT_JAR" SootRunner "$TESTCASE_DIR" "$OPTIMIZED_DIR" --format J 2>/dev/null | grep -v "^Soot \|^O[0-9]" || true
 echo "  Output in: $OPTIMIZED_DIR"
 ls "$OPTIMIZED_DIR"/ | sed 's/^/    /'
 echo ""
