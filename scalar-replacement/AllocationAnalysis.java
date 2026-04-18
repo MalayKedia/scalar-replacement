@@ -357,7 +357,11 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
         List<MethodSummary> r = new ArrayList<>();
         Iterator<Edge> it = cg.edgesOutOf(stmt);
         while (it.hasNext()) {
-            SootMethod tgt = it.next().tgt();
+            Edge e = it.next();
+            SootMethod tgt = e.tgt();
+            // Skip synthetic <clinit> edges — Soot adds them on any static-
+            // member access, but they don't take the call-site's args.
+            if (tgt.getName().equals("<clinit>")) continue;
             MethodSummary s = summaries.get(tgt);
             if (s == null) {
                 r.add(MethodSummary.allBad(paramCountOf(tgt)));

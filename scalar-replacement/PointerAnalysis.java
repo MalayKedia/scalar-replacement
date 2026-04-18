@@ -387,6 +387,9 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
         Iterator<Edge> it = cg.edgesOutOf(stmt);
         while (it.hasNext()) {
             SootMethod tgt = it.next().tgt();
+            // Skip synthetic <clinit> edges — they model class-initialization
+            // side effects, not argument-passing calls.
+            if (tgt.getName().equals("<clinit>")) continue;
             MethodSummary s = summaries.get(tgt);
             if (s == null) {
                 r.add(MethodSummary.allBad(paramCountOf(tgt)));
