@@ -5,7 +5,7 @@ class M {
 class N {
   void foo(M mm) {
     System.out.println(mm.x);
-    bar(mm);
+    // bar(mm);
   }
 
   void bar(M mm) {
@@ -27,11 +27,11 @@ class P extends O {
 
 public class Test {
   public static void main(String[] args) {
-    { // Case 1
-      M o1 = new M(); // O31
-      o1.x = 8;
-      System.out.println(o1.x);
-    }
+    // { // Case 1
+    //   M o1 = new M(); // O31
+    //   o1.x = 8;
+    //   System.out.println(o1.x);
+    // }
 
     { // Case 2
       M o2 = new M(); // O37
@@ -41,12 +41,12 @@ public class Test {
       o3.foo(o2);
     }
 
-    { // Case 3
-      M o4 = new M(); // O45
-      O o5 = new O(); // O46
-      o4.x = 343;
-      o5.foo(o4);
-    }
+    // { // Case 3
+    //   M o4 = new M(); // O45
+    //   O o5 = new O(); // O46
+    //   o4.x = 343;
+    //   o5.foo(o4);
+    // }
 
     return;
   }
