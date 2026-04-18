@@ -5,9 +5,9 @@ import soot.options.Options;
  * Variant of PA3 that outputs class files (-f c) instead of Jimple (-f J),
  * so the transformed code can actually be executed.
  *
- * Usage: java PA3Benchmark <classPath> <outputDir> [--no-transform]
+ * Usage: java SootRunner <classPath> <outputDir> [--no-transform]
  */
-public class PA3Benchmark {
+public class SootRunner {
     public static void main(String[] args) {
         String classPath = args[0];
         String outputDir = args[1];
