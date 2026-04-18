@@ -208,7 +208,11 @@ public class AnalysisTransformer extends SceneTransformer {
                 int line = ra.site.getJavaSourceStartLineNumber();
                 StringJoiner sj = new StringJoiner(",", "[", "]");
                 for (int l : ra.callSiteLines) sj.add(String.valueOf(l));
-                byLine.put(line, "O" + line + " = Y" + sj);
+                // Pure scalar-replace → Y. Partial-escape (some uses
+                // materialize a fresh ref) → P — still transformed, but
+                // reported distinctly so test diffs can tell the two apart.
+                String marker = ra.escapePoints.isEmpty() ? "Y" : "P";
+                byLine.put(line, "O" + line + " = " + marker + sj);
             }
         }
         for (String s : byLine.values()) System.out.println(s);

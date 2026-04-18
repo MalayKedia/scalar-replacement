@@ -32,8 +32,12 @@ public class Phase3Transformer {
         if (allocs.isEmpty()) return;
         Body body = m.getActiveBody();
 
-        // Per-alloc scalar locals, keyed by the allocation and field.
+        // Per-alloc scalar locals, keyed by allocation and field.
         Map<ReplaceableAlloc, Map<SootField, Local>> scalarsPerAlloc = new LinkedHashMap<>();
+        // Per partial-escape alloc: a reused "materialized ref" local that
+        // holds a freshly-allocated object at each escape point. Null entry
+        // means the alloc is pure (no escape points).
+        Map<ReplaceableAlloc, Local> matLocals = new LinkedHashMap<>();
         int allocIdx = 0;
         for (ReplaceableAlloc ra : allocs) {
             Map<SootField, Local> sl = new LinkedHashMap<>();
@@ -45,6 +49,13 @@ public class Phase3Transformer {
                 sl.put(f, l);
             }
             scalarsPerAlloc.put(ra, sl);
+            if (!ra.escapePoints.isEmpty()) {
+                Local mat = Jimple.v().newLocal(
+                    "srMatO" + line + "_" + allocIdx,
+                    ra.allocClass.getType());
+                body.getLocals().add(mat);
+                matLocals.put(ra, mat);
+            }
             allocIdx++;
         }
 
@@ -100,6 +111,24 @@ public class Phase3Transformer {
         }
         for (Map.Entry<Unit, Map<Integer, ReplaceableAlloc>> e : callSiteMap.entrySet()) {
             rewriteCallSite(e.getKey(), e.getValue(), scalarsPerAlloc);
+        }
+
+        // Step 7: materialize at escape points (partial-escape allocs only).
+        // Before each escape-inducing unit, emit a fresh `new X; <init>(...);
+        // copy scalars` block, and replace the alloc-aliased operand in the
+        // escape unit with the freshly-materialized ref.
+        for (ReplaceableAlloc ra : allocs) {
+            if (ra.escapePoints.isEmpty()) continue;
+            Local mat = matLocals.get(ra);
+            Map<SootField, Local> scalars = scalarsPerAlloc.get(ra);
+            for (Unit ep : ra.escapePoints) {
+                if (toRemove.contains(ep)) continue;
+                List<Unit> matBlock = buildMaterializationBlock(ra, mat, scalars);
+                toInsertBefore
+                    .computeIfAbsent(ep, k -> new ArrayList<>())
+                    .addAll(matBlock);
+                replaceAllocOperand(ep, ra, mat, analysis);
+            }
         }
 
         // Apply edits.
@@ -252,6 +281,63 @@ public class Phase3Transformer {
      *  the canonical field order agree. */
     private static Local defaultLocalForField(SootField f) {
         return Jimple.v().newLocal("sr_missing_" + f.getName(), f.getType());
+    }
+
+    /* =============================================================
+     *  Materialization for partial-escape allocs
+     * ============================================================= */
+
+    /**
+     * Build {@code mat = new X; specialinvoke mat.<init>(...); mat.f = sr_f;
+     * ...} to be inserted before an escape unit. Uses the original init
+     * call's actuals. Every field in {@code fieldsUsed} is copied from the
+     * corresponding scalar local so the materialized object reflects the
+     * current state.
+     */
+    private List<Unit> buildMaterializationBlock(ReplaceableAlloc ra,
+            Local mat, Map<SootField, Local> scalars) {
+        List<Unit> r = new ArrayList<>();
+        // mat = new X;
+        r.add(Jimple.v().newAssignStmt(mat,
+            Jimple.v().newNewExpr(ra.allocClass.getType())));
+        // specialinvoke mat.<init>(initActuals);
+        List<Value> initArgs;
+        try {
+            initArgs = new ArrayList<>(
+                ((Stmt) ra.initCall).getInvokeExpr().getArgs());
+        } catch (Exception e) {
+            initArgs = Collections.emptyList();
+        }
+        r.add(Jimple.v().newInvokeStmt(
+            Jimple.v().newSpecialInvokeExpr(mat,
+                ra.initTarget.makeRef(), initArgs)));
+        // mat.f = sr_f for each tracked field.
+        for (Map.Entry<SootField, Local> e : scalars.entrySet()) {
+            r.add(Jimple.v().newAssignStmt(
+                Jimple.v().newInstanceFieldRef(mat, e.getKey().makeRef()),
+                e.getValue()));
+        }
+        return r;
+    }
+
+    /**
+     * In the escape unit, replace every use-box that holds a local aliasing
+     * {@code ra.site} with the materialized ref {@code mat}. The escape
+     * operation (heap store, invoke arg, return, throw) thereby uses the
+     * freshly materialized object instead of the (scalar-replaced) original.
+     */
+    private void replaceAllocOperand(Unit ep, ReplaceableAlloc ra,
+            Local mat, AllocationAnalysis analysis) {
+        AllocState st = analysis.stateBefore(ep);
+        for (ValueBox vb : ep.getUseBoxes()) {
+            Value v = vb.getValue();
+            if (!(v instanceof Local)) continue;
+            Set<Unit> tags = st.allocTag.getOrDefault(
+                (Local) v, Collections.emptySet());
+            if (tags.size() == 1 && tags.contains(ra.site)) {
+                vb.setValue(mat);
+            }
+        }
     }
 
     /* =============================================================

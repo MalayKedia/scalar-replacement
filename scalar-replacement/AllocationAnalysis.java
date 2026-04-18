@@ -67,10 +67,42 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
             if (disqualified.contains(site)) continue;
             if (ra.initCall == null || ra.initTarget == null) continue;
             if (!validateAndWalkChain(ra)) continue;
+            // Partial-escape soundness: if the alloc has any escape points,
+            // we emit materialization there and keep using scalars elsewhere.
+            // That's only sound if no field-write to the alloc is reachable
+            // from any escape point — otherwise post-escape writes would
+            // diverge from the materialized heap snapshot.
+            if (!ra.escapePoints.isEmpty() && hasPostEscapeWrite(ra)) continue;
             populateChainFields(ra);
             r.add(ra);
         }
         return r;
+    }
+
+    /**
+     * True iff any unit in {@code ra.fieldWrites} is CFG-reachable from any
+     * unit in {@code ra.escapePoints} (i.e., a post-escape field write could
+     * happen). BFS over the method's CFG.
+     */
+    private boolean hasPostEscapeWrite(ReplaceableAlloc ra) {
+        if (ra.fieldWrites.isEmpty()) return false;
+        DirectedGraph<Unit> cfg = graph;  // ExceptionalUnitGraph from ForwardFlowAnalysis
+        Set<Unit> writes = new HashSet<>(ra.fieldWrites);
+        Set<Unit> visited = new HashSet<>();
+        Deque<Unit> work = new ArrayDeque<>();
+        for (Unit e : ra.escapePoints) {
+            for (Unit s : cfg.getSuccsOf(e)) {
+                if (visited.add(s)) work.add(s);
+            }
+        }
+        while (!work.isEmpty()) {
+            Unit u = work.poll();
+            if (writes.contains(u)) return true;
+            for (Unit s : cfg.getSuccsOf(u)) {
+                if (visited.add(s)) work.add(s);
+            }
+        }
+        return false;
     }
 
     private boolean validateAndWalkChain(ReplaceableAlloc ra) {
@@ -146,11 +178,13 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
         }
 
         if (stmt instanceof ReturnStmt) {
-            disqualifyAll(localTag(((ReturnStmt) stmt).getOp(), in));
+            // Return is a terminal escape — ref outlives our method.
+            recordEscape(localTag(((ReturnStmt) stmt).getOp(), in), (Unit) stmt);
             return;
         }
         if (stmt instanceof ThrowStmt) {
-            disqualifyAll(localTag(((ThrowStmt) stmt).getOp(), in));
+            // Throw is a terminal escape — ref flows to the exception handler.
+            recordEscape(localTag(((ThrowStmt) stmt).getOp(), in), (Unit) stmt);
             return;
         }
         if (stmt instanceof IfStmt) {
@@ -196,16 +230,18 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
             // all of them.
             disqualifyIfAmbiguous(baseTag);
             for (Unit u : baseTag) {
-                if (allocs.containsKey(u) && !disqualified.contains(u))
-                    allocs.get(u).fieldsUsed.add(ref.getField());
+                if (allocs.containsKey(u) && !disqualified.contains(u)) {
+                    ReplaceableAlloc ra = allocs.get(u);
+                    ra.fieldsUsed.add(ref.getField());
+                    if (!ra.fieldWrites.contains(stmt)) ra.fieldWrites.add(stmt);
+                }
             }
-            // Any param/alloc ref stored into a heap location escapes from
-            // our scalar-replacement perspective — disqualify.
-            disqualifyAll(rhsTag);
+            // A ref being stored into a heap slot is an escape.
+            recordEscape(rhsTag, (Unit) stmt);
         } else if (lhs instanceof ArrayRef) {
-            disqualifyAll(rhsTag);
+            recordEscape(rhsTag, (Unit) stmt);
         } else if (lhs instanceof StaticFieldRef) {
-            disqualifyAll(rhsTag);
+            recordEscape(rhsTag, (Unit) stmt);
         }
     }
 
@@ -329,14 +365,26 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
     private boolean checkArgAgainstCallee(Set<Unit> argTag, int paramIdx, Stmt stmt) {
         List<MethodSummary> callees = getCalleeSummaries(stmt);
         if (callees.isEmpty()) {
+            // Unknown target — be conservative and hard-disqualify. We can't
+            // partial-escape because we don't know whether the callee mutates.
             disqualifyAll(argTag);
             return false;
         }
         for (MethodSummary s : callees) {
-            if (paramIdx >= s.paramCount
-                    || !s.goodParams.contains(paramIdx)
-                    || !s.allModified(paramIdx).isEmpty()) {
+            if (paramIdx >= s.paramCount) {
                 disqualifyAll(argTag);
+                return false;
+            }
+            // A callee that *mutates* the alloc's fields breaks our "scalars
+            // stay valid through escape" invariant — hard-disqualify.
+            if (!s.allModified(paramIdx).isEmpty()) {
+                disqualifyAll(argTag);
+                return false;
+            }
+            // Callee's param isn't good (escapes/identity/forwarded) but
+            // doesn't mutate — treat as an escape point (partial candidate).
+            if (!s.goodParams.contains(paramIdx)) {
+                recordEscape(argTag, (Unit) stmt);
                 return false;
             }
         }
@@ -395,6 +443,22 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
 
     private void disqualifyAll(Collection<Unit> sites) {
         for (Unit u : sites) disqualify(u);
+    }
+
+    /**
+     * Record {@code escapeUnit} as an escape point for every alloc in
+     * {@code allocSites}. The alloc stays a candidate (the dataflow keeps
+     * tracking it); later we'll verify that no post-escape writes occur and
+     * then either scalar-replace with transient materialization or hard-
+     * disqualify.
+     */
+    private void recordEscape(Collection<Unit> allocSites, Unit escapeUnit) {
+        for (Unit site : allocSites) {
+            if (!allocs.containsKey(site) || disqualified.contains(site)) continue;
+            ReplaceableAlloc ra = allocs.get(site);
+            if (!ra.escapePoints.contains(escapeUnit))
+                ra.escapePoints.add(escapeUnit);
+        }
     }
 
     /**
