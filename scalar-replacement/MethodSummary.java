@@ -60,6 +60,15 @@ public class MethodSummary {
      */
     SootMethod chainInitTarget = null;
 
+    /**
+     * For each param i: source-line numbers of every call in this method's
+     * body that receives param i (or a callee's own forwarded param i
+     * transitively). Phase 2 unions these into a replaceable allocation's
+     * call-site report so {@code Y[...]} lists every line touched by the
+     * specialization, not just the immediate call sites.
+     */
+    final Map<Integer, Set<Integer>> paramCallSites = new HashMap<>();
+
     public MethodSummary(int paramCount) {
         this.paramCount = paramCount;
     }

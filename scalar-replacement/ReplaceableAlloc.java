@@ -36,6 +36,11 @@ public class ReplaceableAlloc {
      *  or receiver — Phase 3 rewrites these into specialized-callee calls. */
     final List<Unit> helperCallSites = new ArrayList<>();
 
+    /** Source-line numbers of every call site touched by the specialization,
+     *  including transitive forwarded calls inside specialized callees.
+     *  Informational: fed to the {@code Y[...]} output. */
+    final Set<Integer> callSiteLines = new TreeSet<>();
+
     public ReplaceableAlloc(Unit site, SootClass allocClass) {
         this.site = site;
         this.allocClass = allocClass;

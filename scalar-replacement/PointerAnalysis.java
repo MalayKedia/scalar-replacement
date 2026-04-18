@@ -267,6 +267,8 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
         if (isInstance) actuals.add(((InstanceInvokeExpr) invoke).getBase());
         actuals.addAll(invoke.getArgs());
 
+        int curLine = stmt.getJavaSourceStartLineNumber();
+
         for (int i = 0; i < actuals.size(); i++) {
             Value a = actuals.get(i);
             if (!(a instanceof Local)) continue;
@@ -279,6 +281,7 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
             boolean identityInAny = false;
             Set<SootField> modAt = new HashSet<>();
             Set<SootField> readAt = new HashSet<>();
+            Set<Integer> transitiveCallSites = new HashSet<>();
 
             if (callees.isEmpty()) {
                 goodInAllTargets = false;
@@ -292,6 +295,8 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
                     if (s.identityUsedParams.contains(i)) identityInAny = true;
                     modAt.addAll(s.allModified(i));
                     readAt.addAll(s.read(i));
+                    transitiveCallSites.addAll(
+                        s.paramCallSites.getOrDefault(i, Collections.emptySet()));
                 }
             }
 
@@ -318,6 +323,17 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
                     result.readFields
                         .computeIfAbsent(p, k -> new HashSet<>())
                         .addAll(readAt);
+
+                // Track call-site lines for this param: current call's line
+                // plus callees' own transitive forwarded-call lines.
+                if (curLine > 0)
+                    result.paramCallSites
+                        .computeIfAbsent(p, k -> new HashSet<>())
+                        .add(curLine);
+                if (!transitiveCallSites.isEmpty())
+                    result.paramCallSites
+                        .computeIfAbsent(p, k -> new HashSet<>())
+                        .addAll(transitiveCallSites);
             }
         }
 

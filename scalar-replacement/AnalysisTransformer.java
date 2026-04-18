@@ -72,8 +72,7 @@ public class AnalysisTransformer extends SceneTransformer {
             }
         }
 
-        printSummaries();
-        printAllocs(perMethodAllocs);
+        printYResults(perMethodAllocs);
     }
 
     private void installObjectInitSummary() {
@@ -177,56 +176,21 @@ public class AnalysisTransformer extends SceneTransformer {
         int counter = 0;
     }
 
-    /* =============================================================
-     *  Debug output
-     * ============================================================= */
-
-    private void printSummaries() {
-        List<SootMethod> ordered = new ArrayList<>(summaries.keySet());
-        ordered.sort(Comparator.comparing(SootMethod::getSignature));
-        for (SootMethod m : ordered) {
-            MethodSummary s = summaries.get(m);
-            System.out.println(m.getSignature());
-            System.out.println("  paramCount = " + s.paramCount);
-            System.out.println("  goodParams = " + sorted(s.goodParams));
-            System.out.println("  escaping   = " + sorted(s.escapingParams));
-            System.out.println("  identity   = " + sorted(s.identityUsedParams));
-            System.out.println("  fwdBad     = " + sorted(s.forwardedBadParams));
-            System.out.println("  retAlias   = " + sorted(s.returnAliases));
-            System.out.println("  dirMod     = " + s.directlyModifiedFields);
-            System.out.println("  calMod     = " + s.calleeModifiedFields);
-            System.out.println("  read       = " + s.readFields);
-        }
-    }
-
-    private static List<Integer> sorted(Set<Integer> s) {
-        List<Integer> l = new ArrayList<>(s);
-        Collections.sort(l);
-        return l;
-    }
-
-    private void printAllocs(Map<SootMethod, List<ReplaceableAlloc>> perMethodAllocs) {
-        if (perMethodAllocs.isEmpty()) {
-            System.out.println("\n=== Phase 2: no scalar-replaceable allocations ===");
-            return;
-        }
-        System.out.println("\n=== Phase 2: replaceable allocations ===");
-        for (Map.Entry<SootMethod, List<ReplaceableAlloc>> e : perMethodAllocs.entrySet()) {
-            System.out.println(e.getKey().getSignature());
-            for (ReplaceableAlloc ra : e.getValue()) {
+    /**
+     * Print one {@code O<line> = Y[callsite_lines]} line per
+     * scalar-replaceable allocation across the whole program, sorted by
+     * allocation line. Disqualified allocations are suppressed.
+     */
+    private void printYResults(Map<SootMethod, List<ReplaceableAlloc>> perMethodAllocs) {
+        Map<Integer, String> byLine = new TreeMap<>();
+        for (List<ReplaceableAlloc> ras : perMethodAllocs.values()) {
+            for (ReplaceableAlloc ra : ras) {
                 int line = ra.site.getJavaSourceStartLineNumber();
-                System.out.println("  line " + line + ": new " + ra.allocClass.getShortName()
-                    + "  fields=" + ra.fieldsUsed
-                    + "  chain=" + chainStr(ra.initChain)
-                    + "  helperCalls=" + ra.helperCallSites.size());
+                StringJoiner sj = new StringJoiner(",", "[", "]");
+                for (int l : ra.callSiteLines) sj.add(String.valueOf(l));
+                byLine.put(line, "O" + line + " = Y" + sj);
             }
         }
-    }
-
-    private static String chainStr(List<SootMethod> chain) {
-        StringJoiner sj = new StringJoiner(" -> ");
-        for (SootMethod m : chain)
-            sj.add(m.getDeclaringClass().getShortName() + ".<init>");
-        return sj.toString();
+        for (String s : byLine.values()) System.out.println(s);
     }
 }

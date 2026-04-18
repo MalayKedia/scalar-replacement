@@ -280,17 +280,30 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
         }
 
         // Regular call: strict rule on every arg carrying an alloc tag.
+        int curLine = stmt.getJavaSourceStartLineNumber();
+        List<MethodSummary> callees = getCalleeSummaries(stmt);
+
         for (int i = 0; i < actuals.size(); i++) {
             Set<Unit> argTag = localTag(actuals.get(i), in);
             if (argTag.isEmpty()) continue;
             boolean passed = checkArgAgainstCallee(argTag, i, stmt);
-            if (passed) {
-                for (Unit u : argTag) {
-                    if (allocs.containsKey(u) && !disqualified.contains(u)) {
-                        List<Unit> cs = allocs.get(u).helperCallSites;
-                        if (!cs.contains(stmt)) cs.add(stmt);
-                    }
-                }
+            if (!passed) continue;
+
+            // Accumulate call-site lines: current call's line + each
+            // callee's transitive forwarded-call lines at this position.
+            Set<Integer> transitive = new HashSet<>();
+            for (MethodSummary s : callees) {
+                transitive.addAll(
+                    s.paramCallSites.getOrDefault(i, Collections.emptySet()));
+            }
+
+            for (Unit u : argTag) {
+                if (!allocs.containsKey(u) || disqualified.contains(u)) continue;
+                ReplaceableAlloc ra = allocs.get(u);
+                if (!ra.helperCallSites.contains(stmt))
+                    ra.helperCallSites.add(stmt);
+                if (curLine > 0) ra.callSiteLines.add(curLine);
+                ra.callSiteLines.addAll(transitive);
             }
         }
     }
