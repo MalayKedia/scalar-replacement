@@ -24,14 +24,13 @@ public class SootRunner {
             }
         }
 
-        Options.v().set_keep_line_number(true);
-        Options.v().set_output_dir(outputDir);
-
         AnalysisTransformer analysisTransformer = new AnalysisTransformer();
         analysisTransformer.enableTransformation = transform;
         PackManager.v().getPack("wjtp").add(new Transform("wjtp.dfa", analysisTransformer));
 
         String[] sootArgs = {
+            "-d", outputDir,
+            "-keep-line-number",
             "-cp", classPath,
             "-pp",
             "-w",
@@ -43,12 +42,12 @@ public class SootRunner {
             "-exclude", "sun.*",
             "-exclude", "com.sun.*",
             "-exclude", "jdk.*",
-            // Disable Soot's own Jimple optimizations so our scalar
-            // replacement locals are preserved in the output.
-            "-p", "jop", "enabled:false",
-            "-p", "jb.cp", "enabled:false",
-            "-p", "jb.dae", "enabled:false",
-            "-p", "jb.cp-ule", "enabled:false",
+            // Disable local packers so each local gets its own slot.
+            // Without this, Soot reuses the parameter slot for scalar
+            // locals of a different type, producing StackMap conflicts
+            // that decompilers cannot handle.
+            "-p", "jb.ulp", "enabled:false",
+            "-p", "jb.lp", "enabled:false",
             "-f", format,
             "-t", "1",
             "-main-class", "Test",

@@ -6,7 +6,7 @@
 # Usage:  ./benchmark.sh <TestDir>
 #   e.g.  ./benchmark.sh testcases_balaji/Test1
 #
-# Outputs:
+# Outputs (inside the test case directory):
 #   benchmark_baseline/   — .class and .jimple files WITHOUT transformation
 #   benchmark_optimized/  — .class and .jimple files WITH transformation
 
@@ -24,8 +24,8 @@ SOOT_JAR="$PROJECT_DIR/soot-4.6.0-jar-with-dependencies.jar"
 BUILD_DIR="$SRC_DIR/build"
 TESTCASE_DIR="$PROJECT_DIR/$1"
 
-BASELINE_DIR="$PROJECT_DIR/benchmark_baseline"
-OPTIMIZED_DIR="$PROJECT_DIR/benchmark_optimized"
+BASELINE_DIR="$TESTCASE_DIR/benchmark_baseline"
+OPTIMIZED_DIR="$TESTCASE_DIR/benchmark_optimized"
 
 ITERATIONS=5
 # Use -Xint (interpreter only) so the JVM's own JIT escape analysis
@@ -38,12 +38,13 @@ mkdir -p "$BUILD_DIR"
 javac -d "$BUILD_DIR" -cp "$SOOT_JAR" "$SRC_DIR"/*.java
 echo ""
 
-# ── Step 2: Compile test case if needed ─────────────────────────
-for f in "$TESTCASE_DIR"/*.java; do
-    [ -f "$f" ] || continue
-    echo "=== Compiling $f ==="
-    javac "$f" 2>/dev/null || true
-done
+# ── Step 2: Compile test case into a temp staging dir ───────────
+#    Soot's -process-dir scans recursively, so we stage .class files
+#    in a temp dir to avoid it picking up benchmark output subdirs.
+echo "=== Compiling test case ==="
+STAGING_DIR=$(mktemp -d)
+trap 'rm -rf "$STAGING_DIR"' EXIT
+javac -d "$STAGING_DIR" "$TESTCASE_DIR"/*.java 2>/dev/null || true
 echo ""
 
 # ── Step 3: Clean output dirs ──────────────────────────────────
@@ -51,18 +52,17 @@ rm -rf "$BASELINE_DIR" "$OPTIMIZED_DIR"
 mkdir -p "$BASELINE_DIR" "$OPTIMIZED_DIR"
 
 # ── Step 4: Soot pass — baseline (no transformation) ───────────
-#    Run twice: once for class files, once for Jimple, into the same dir.
 echo "=== Running Soot (baseline, no transformation) ==="
-java -cp "$BUILD_DIR:$SOOT_JAR" SootRunner "$TESTCASE_DIR" "$BASELINE_DIR" --no-transform --format c 2>/dev/null | grep -v "^Soot \|^O[0-9]" || true
-java -cp "$BUILD_DIR:$SOOT_JAR" SootRunner "$TESTCASE_DIR" "$BASELINE_DIR" --no-transform --format J 2>/dev/null | grep -v "^Soot \|^O[0-9]" || true
+java -cp "$BUILD_DIR:$SOOT_JAR" SootRunner "$STAGING_DIR" "$BASELINE_DIR" --no-transform --format c 2>/dev/null | grep -v "^Soot \|^O[0-9]" || true
+java -cp "$BUILD_DIR:$SOOT_JAR" SootRunner "$STAGING_DIR" "$BASELINE_DIR" --no-transform --format J 2>/dev/null | grep -v "^Soot \|^O[0-9]" || true
 echo "  Output in: $BASELINE_DIR"
 ls "$BASELINE_DIR"/ | sed 's/^/    /'
 echo ""
 
 # ── Step 5: Soot pass — optimized (with scalar replacement) ────
 echo "=== Running Soot (optimized, with scalar replacement) ==="
-java -cp "$BUILD_DIR:$SOOT_JAR" SootRunner "$TESTCASE_DIR" "$OPTIMIZED_DIR" --format c 2>/dev/null | grep -v "^Soot \|^O[0-9]" || true
-java -cp "$BUILD_DIR:$SOOT_JAR" SootRunner "$TESTCASE_DIR" "$OPTIMIZED_DIR" --format J 2>/dev/null | grep -v "^Soot \|^O[0-9]" || true
+java -cp "$BUILD_DIR:$SOOT_JAR" SootRunner "$STAGING_DIR" "$OPTIMIZED_DIR" --format c 2>/dev/null | grep -v "^Soot \|^O[0-9]" || true
+java -cp "$BUILD_DIR:$SOOT_JAR" SootRunner "$STAGING_DIR" "$OPTIMIZED_DIR" --format J 2>/dev/null | grep -v "^Soot \|^O[0-9]" || true
 echo "  Output in: $OPTIMIZED_DIR"
 ls "$OPTIMIZED_DIR"/ | sed 's/^/    /'
 echo ""
@@ -79,7 +79,17 @@ echo "--- Test.jimple diff ---"
 diff --color=auto "$BASELINE_DIR/Test.jimple" "$OPTIMIZED_DIR/Test.jimple" || true
 echo ""
 
-# ── Step 7: Benchmark execution ─────────────────────────────────
+# ── Step 7: Run output comparison ───────────────────────────────
+echo "=== Program output ==="
+echo ""
+echo "--- Baseline ---"
+java $JVM_FLAGS -cp "$BASELINE_DIR" Test 2>&1 || true
+echo ""
+echo "--- Optimized ---"
+java $JVM_FLAGS -cp "$OPTIMIZED_DIR" Test 2>&1 || true
+echo ""
+
+# ── Step 8: Benchmark execution ─────────────────────────────────
 echo "=== Benchmarking ($ITERATIONS iterations each) ==="
 echo ""
 

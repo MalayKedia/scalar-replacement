@@ -6,7 +6,7 @@ class Vec3 {
   int a, b, c;
 }
 
-public class Test1 {
+public class Test {
   public static void main(String[] args) {
     long sum = 0;
 

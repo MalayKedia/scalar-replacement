@@ -595,16 +595,28 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
 
         // Step 4: Second pass — rewrite field accesses, mark allocations/inits for removal
         List<Unit> toRemove = new ArrayList<>();
+        // Deferred inserts: at each allocation site, insert default-value inits.
+        // We cannot modify the unit chain while iterating, so collect and apply after.
+        Map<Unit, List<Unit>> toInsertBefore = new LinkedHashMap<>();
 
         for (Unit u : body.getUnits()) {
             Stmt stmt = (Stmt) u;
 
-            // Mark allocation statements for removal
+            // Replace allocation statements with default-value inits for scalar locals.
+            // Object fields default to 0/false/null in Java; local variables do not,
+            // so we must explicitly initialize each scalar local at the allocation site.
             if (u instanceof AssignStmt) {
                 AssignStmt assign = (AssignStmt) u;
                 if (assign.getRightOp() instanceof NewExpr) {
                     AllocObject obj = allocObjects.get(u);
                     if (obj != null && noCallSiteObjects.containsKey(obj)) {
+                        Map<SootField, Local> locals = fieldLocals.get(obj);
+                        List<Unit> inits = new ArrayList<>();
+                        for (Local scalarLocal : locals.values()) {
+                            inits.add(Jimple.v().newAssignStmt(
+                                scalarLocal, getDefaultValue(scalarLocal.getType())));
+                        }
+                        toInsertBefore.put(u, inits);
                         toRemove.add(u);
                         continue;
                     }
@@ -652,7 +664,12 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
             }
         }
 
-        // Step 5: Remove dead statements
+        // Step 5: Insert default-value inits, then remove dead statements
+        for (Map.Entry<Unit, List<Unit>> entry : toInsertBefore.entrySet()) {
+            for (Unit init : entry.getValue()) {
+                body.getUnits().insertBefore(init, entry.getKey());
+            }
+        }
         for (Unit u : toRemove) {
             body.getUnits().remove(u);
         }
@@ -698,6 +715,22 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
         if (single instanceof AllocObject && candidates.contains(single))
             return (AllocObject) single;
         return null;
+    }
+
+    /**
+     * Return the Jimple default value for a type:
+     * 0 for int/byte/short/char/boolean, 0L for long, 0.0f/0.0 for float/double,
+     * null for reference types.
+     */
+    private Value getDefaultValue(Type t) {
+        if (t instanceof IntType || t instanceof ByteType
+                || t instanceof ShortType || t instanceof CharType
+                || t instanceof BooleanType)
+            return IntConstant.v(0);
+        if (t instanceof LongType)    return LongConstant.v(0);
+        if (t instanceof FloatType)   return FloatConstant.v(0);
+        if (t instanceof DoubleType)  return DoubleConstant.v(0);
+        return NullConstant.v();
     }
 
     /**
