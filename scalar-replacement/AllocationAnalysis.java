@@ -389,13 +389,17 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
             }
         }
         // All targets accept: accumulate read-field contributions into the
-        // alloc's fieldsUsed (these become scalar locals in Phase 3).
+        // alloc's fieldsUsed (these become scalar locals in Phase 3). Also
+        // note if any target has a non-empty paramEscapePoints — that means
+        // materialization happens in the specialized callee body ("L" case).
         for (MethodSummary s : callees) {
             Set<SootField> reads = s.read(paramIdx);
-            if (reads.isEmpty()) continue;
+            boolean calleeHasEscape = !s.paramEscapes(paramIdx).isEmpty();
             for (Unit u : argTag) {
-                if (allocs.containsKey(u) && !disqualified.contains(u))
-                    allocs.get(u).fieldsUsed.addAll(reads);
+                if (!allocs.containsKey(u) || disqualified.contains(u)) continue;
+                ReplaceableAlloc ra = allocs.get(u);
+                if (!reads.isEmpty()) ra.fieldsUsed.addAll(reads);
+                if (calleeHasEscape) ra.hasCalleeMaterialization = true;
             }
         }
         return true;
