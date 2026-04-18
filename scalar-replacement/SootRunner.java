@@ -9,8 +9,8 @@ import soot.options.Options;
  *   --format c   output class files (default)
  *   --format J   output Jimple files
  */
-public class PA3Benchmark {
-    public static void main(String[] args) {
+public class SootRunner {
+   public static void main(String[] args) {
         String classPath = args[0];
         String outputDir = args[1];
         boolean transform = true;
