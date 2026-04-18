@@ -188,6 +188,10 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
         if (lhs instanceof InstanceFieldRef) {
             InstanceFieldRef ref = (InstanceFieldRef) lhs;
             Set<Unit> baseTag = localTag(ref.getBase(), in);
+            // If the base may alias more than one tracked allocation, we
+            // cannot pick which set of scalar locals to write to — disqualify
+            // all of them.
+            disqualifyIfAmbiguous(baseTag);
             for (Unit u : baseTag) {
                 if (allocs.containsKey(u) && !disqualified.contains(u))
                     allocs.get(u).fieldsUsed.add(ref.getField());
@@ -231,6 +235,7 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
         if (v instanceof InstanceFieldRef) {
             InstanceFieldRef ref = (InstanceFieldRef) v;
             Set<Unit> baseTag = localTag(ref.getBase(), in);
+            disqualifyIfAmbiguous(baseTag);
             for (Unit u : baseTag) {
                 if (allocs.containsKey(u) && !disqualified.contains(u))
                     allocs.get(u).fieldsUsed.add(ref.getField());
@@ -257,14 +262,17 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
         if (isInit && isInstance) {
             // Receiver = the object being initialized. Pair it with the alloc.
             Set<Unit> receiverTag = localTag(actuals.get(0), in);
+            disqualifyIfAmbiguous(receiverTag);
             for (Unit u : receiverTag) {
                 if (!allocs.containsKey(u)) continue;
                 ReplaceableAlloc ra = allocs.get(u);
-                if (ra.initCall != null) {
-                    // Multiple <init>s on the same alloc — shouldn't happen
-                    // in legal Jimple; be conservative.
+                if (ra.initCall != null && !ra.initCall.equals(stmt)) {
+                    // Two distinct <init> statements target the same alloc —
+                    // can't happen in legal Jimple, but be conservative.
+                    // (Re-visiting the same stmt during fixpoint iteration
+                    //  is fine and must not trip this check.)
                     disqualify(u);
-                } else {
+                } else if (ra.initCall == null) {
                     ra.initCall = stmt;
                     try {
                         ra.initTarget = invoke.getMethod();
@@ -286,6 +294,7 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
         for (int i = 0; i < actuals.size(); i++) {
             Set<Unit> argTag = localTag(actuals.get(i), in);
             if (argTag.isEmpty()) continue;
+            disqualifyIfAmbiguous(argTag);
             boolean passed = checkArgAgainstCallee(argTag, i, stmt);
             if (!passed) continue;
 
@@ -379,5 +388,15 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
 
     private void disqualifyAll(Collection<Unit> sites) {
         for (Unit u : sites) disqualify(u);
+    }
+
+    /**
+     * A local whose alloc-tag set has more than one member cannot be scalar-
+     * replaced through, because any use of the local (field access, invoke
+     * arg) would need to pick which allocation's scalar locals to read/write.
+     * Disqualify every candidate in such a set.
+     */
+    private void disqualifyIfAmbiguous(Set<Unit> tag) {
+        if (tag.size() > 1) disqualifyAll(tag);
     }
 }
