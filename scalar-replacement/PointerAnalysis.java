@@ -541,6 +541,15 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
     void performScalarReplacement() {
         AnalysisState fin = getFinalState();
 
+        performNoCallSiteScalarReplacement(fin);
+        performReceiverCallScalarReplacement(fin);
+    }
+
+    /* =============================================================
+     *  Phase 1: Y[] objects (no call sites)
+     * ============================================================= */
+
+    private void performNoCallSiteScalarReplacement(AnalysisState fin) {
         // Step 1: Identify scalar-replaceable objects with no call sites
         Map<AllocObject, Unit> noCallSiteObjects = new LinkedHashMap<>();
         for (Unit u : body.getUnits()) {
@@ -674,6 +683,459 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
             body.getUnits().remove(u);
         }
     }
+
+    /* =============================================================
+     *  Phase 2: Y[callsites] objects — receiver of method calls
+     *
+     *  For each scalar-replaceable object used as the receiver of method
+     *  calls, create a static variant of each callee that takes the
+     *  object's fields as parameters.  Then scalar-replace the object
+     *  the same way as Phase 1 and rewrite the invokes to use the
+     *  static variants.
+     *
+     *  Pessimistic safety checks:
+     *    - The object is ONLY used as the receiver (never passed as arg)
+     *    - In the callee, 'this' is ONLY used in field reads
+     *      (no writes, no aliasing, no monitor ops, no identity checks,
+     *       no passing to other methods, no returning)
+     * ============================================================= */
+
+    private void performReceiverCallScalarReplacement(AnalysisState fin) {
+        // Step 1: Identify Y[callsites] candidates
+        Map<AllocObject, Unit> candidates = new LinkedHashMap<>();
+        for (Unit u : body.getUnits()) {
+            if (!(u instanceof AssignStmt)) continue;
+            AssignStmt assign = (AssignStmt) u;
+            if (!(assign.getRightOp() instanceof NewExpr)) continue;
+
+            AllocObject obj = allocObjects.get(u);
+            if (obj == null) continue;
+            if (fin.escaped.contains(obj)) continue;
+            if (fin.modifiedInCalls.contains(obj)) continue;
+            if (fin.localPointsToMultiple.contains(obj)) continue;
+
+            Set<Integer> sites = fin.callSites.getOrDefault(obj, Collections.emptySet());
+            if (sites.isEmpty()) continue; // already handled in Phase 1
+
+            candidates.put(obj, u);
+        }
+        if (candidates.isEmpty()) return;
+
+        // Step 2: Validate each candidate
+        //  - Every invoke where the object is the receiver must have a safe callee
+        //  - The object must NOT be passed as an argument anywhere
+        Map<AllocObject, Unit> eligible = new LinkedHashMap<>();
+
+        for (Map.Entry<AllocObject, Unit> entry : candidates.entrySet()) {
+            AllocObject obj = entry.getKey();
+            boolean ok = true;
+
+            for (Unit u : body.getUnits()) {
+                Stmt stmt = (Stmt) u;
+                if (!stmt.containsInvokeExpr()) continue;
+                InvokeExpr invoke = stmt.getInvokeExpr();
+
+                // Check: is this object passed as an explicit argument? → disqualify
+                for (Value arg : invoke.getArgs()) {
+                    if (!(arg instanceof Local)) continue;
+                    AllocObject target = resolveUniqueAllocTarget(
+                        (Local) arg, u, candidates.keySet());
+                    if (target != null && target.equals(obj)) { ok = false; break; }
+                }
+                if (!ok) break;
+
+                // Check: is this object the receiver?
+                if (!(invoke instanceof InstanceInvokeExpr)) continue;
+                Local base = (Local) ((InstanceInvokeExpr) invoke).getBase();
+                AllocObject target = resolveUniqueAllocTarget(base, u, candidates.keySet());
+                if (target == null || !target.equals(obj)) continue;
+                if (invoke.getMethod().getName().equals("<init>")) continue;
+
+                // Resolve to the exact callee using the allocation type
+                NewExpr newExpr = (NewExpr) ((AssignStmt) entry.getValue()).getRightOp();
+                SootClass exactType = newExpr.getBaseType().getSootClass();
+                try {
+                    SootMethod callee = exactType.getMethod(
+                        invoke.getMethod().getSubSignature());
+                    if (!isCalleeBodySafeForReceiverReplacement(callee)) {
+                        ok = false; break;
+                    }
+                } catch (Exception e) { ok = false; break; }
+            }
+            if (ok) eligible.put(obj, entry.getValue());
+        }
+        if (eligible.isEmpty()) return;
+
+        // Step 3: Record var names / class names
+        Map<AllocObject, String> varNames = new HashMap<>();
+        Map<AllocObject, String> classNames = new HashMap<>();
+        for (Map.Entry<AllocObject, Unit> entry : eligible.entrySet()) {
+            AssignStmt alloc = (AssignStmt) entry.getValue();
+            varNames.put(entry.getKey(), ((Local) alloc.getLeftOp()).getName());
+            classNames.put(entry.getKey(),
+                ((NewExpr) alloc.getRightOp()).getBaseType().getSootClass().getShortName());
+        }
+
+        // Step 4: Collect fields from caller body AND callee bodies, create scalar locals
+        Map<AllocObject, Map<SootField, Local>> fieldLocals = new HashMap<>();
+        for (AllocObject obj : eligible.keySet())
+            fieldLocals.put(obj, new HashMap<>());
+
+        // From caller field accesses
+        for (Unit u : body.getUnits()) {
+            if (!(u instanceof AssignStmt)) continue;
+            AssignStmt assign = (AssignStmt) u;
+            collectFieldLocal(assign.getLeftOp(), u, eligible, varNames, classNames, fieldLocals);
+            collectFieldLocal(assign.getRightOp(), u, eligible, varNames, classNames, fieldLocals);
+        }
+
+        // From callee bodies (fields read on 'this')
+        for (Map.Entry<AllocObject, Unit> entry : eligible.entrySet()) {
+            AllocObject obj = entry.getKey();
+            NewExpr newExpr = (NewExpr) ((AssignStmt) entry.getValue()).getRightOp();
+            SootClass exactType = newExpr.getBaseType().getSootClass();
+
+            for (Unit u : body.getUnits()) {
+                Stmt stmt = (Stmt) u;
+                if (!stmt.containsInvokeExpr()) continue;
+                InvokeExpr invoke = stmt.getInvokeExpr();
+                if (!(invoke instanceof InstanceInvokeExpr)) continue;
+                if (invoke.getMethod().getName().equals("<init>")) continue;
+                Local base = (Local) ((InstanceInvokeExpr) invoke).getBase();
+                AllocObject target = resolveUniqueAllocTarget(base, u, eligible.keySet());
+                if (target == null || !target.equals(obj)) continue;
+
+                SootMethod callee = exactType.getMethod(invoke.getMethod().getSubSignature());
+                for (SootField f : getFieldsAccessedOnThis(callee.getActiveBody())) {
+                    fieldLocals.get(obj).computeIfAbsent(f, field -> {
+                        String name = varNames.get(obj) + "_" + classNames.get(obj)
+                                    + "_" + field.getName();
+                        Local sl = Jimple.v().newLocal(name, field.getType());
+                        body.getLocals().add(sl);
+                        return sl;
+                    });
+                }
+            }
+        }
+
+        // Step 5: Create static method variants (one per callee, deduplicated)
+        Map<SootMethod, SootMethod> staticVariants = new HashMap<>();
+        Map<SootMethod, List<SootField>> methodFieldsUsed = new HashMap<>();
+
+        for (Map.Entry<AllocObject, Unit> entry : eligible.entrySet()) {
+            AllocObject obj = entry.getKey();
+            NewExpr newExpr = (NewExpr) ((AssignStmt) entry.getValue()).getRightOp();
+            SootClass exactType = newExpr.getBaseType().getSootClass();
+
+            for (Unit u : body.getUnits()) {
+                Stmt stmt = (Stmt) u;
+                if (!stmt.containsInvokeExpr()) continue;
+                InvokeExpr invoke = stmt.getInvokeExpr();
+                if (!(invoke instanceof InstanceInvokeExpr)) continue;
+                if (invoke.getMethod().getName().equals("<init>")) continue;
+                Local base = (Local) ((InstanceInvokeExpr) invoke).getBase();
+                AllocObject target = resolveUniqueAllocTarget(base, u, eligible.keySet());
+                if (target == null || !target.equals(obj)) continue;
+
+                SootMethod callee = exactType.getMethod(invoke.getMethod().getSubSignature());
+                if (staticVariants.containsKey(callee)) continue;
+
+                List<SootField> fieldsUsed = getFieldsAccessedOnThis(callee.getActiveBody());
+                SootMethod sv = createStaticVariant(callee, fieldsUsed);
+                if (sv != null) {
+                    staticVariants.put(callee, sv);
+                    methodFieldsUsed.put(callee, fieldsUsed);
+                }
+            }
+        }
+
+        // Step 6: Rewrite the caller body
+        List<Unit> toRemove = new ArrayList<>();
+        Map<Unit, List<Unit>> toInsertBefore = new LinkedHashMap<>();
+
+        for (Unit u : body.getUnits()) {
+            Stmt stmt = (Stmt) u;
+
+            if (u instanceof AssignStmt) {
+                AssignStmt assign = (AssignStmt) u;
+
+                // Replace new with default-value inits
+                if (assign.getRightOp() instanceof NewExpr) {
+                    AllocObject obj = allocObjects.get(u);
+                    if (obj != null && eligible.containsKey(obj)) {
+                        List<Unit> inits = new ArrayList<>();
+                        for (Local sl : fieldLocals.get(obj).values())
+                            inits.add(Jimple.v().newAssignStmt(sl, getDefaultValue(sl.getType())));
+                        toInsertBefore.put(u, inits);
+                        toRemove.add(u);
+                        continue;
+                    }
+                }
+
+                // Rewrite field stores
+                if (assign.getLeftOp() instanceof InstanceFieldRef) {
+                    InstanceFieldRef ref = (InstanceFieldRef) assign.getLeftOp();
+                    AllocObject target = resolveUniqueAllocTarget(
+                        (Local) ref.getBase(), u, eligible.keySet());
+                    if (target != null) {
+                        Local sl = fieldLocals.get(target).get(ref.getField());
+                        if (sl != null) assign.setLeftOp(sl);
+                    }
+                }
+
+                // Rewrite field loads
+                if (assign.getRightOp() instanceof InstanceFieldRef) {
+                    InstanceFieldRef ref = (InstanceFieldRef) assign.getRightOp();
+                    AllocObject target = resolveUniqueAllocTarget(
+                        (Local) ref.getBase(), u, eligible.keySet());
+                    if (target != null) {
+                        Local sl = fieldLocals.get(target).get(ref.getField());
+                        if (sl != null) assign.setRightOp(sl);
+                    }
+                }
+            }
+
+            // Remove <init> calls
+            if (stmt.containsInvokeExpr()
+                    && stmt.getInvokeExpr() instanceof SpecialInvokeExpr) {
+                SpecialInvokeExpr inv = (SpecialInvokeExpr) stmt.getInvokeExpr();
+                if (inv.getMethod().getName().equals("<init>")) {
+                    AllocObject target = resolveUniqueAllocTarget(
+                        (Local) inv.getBase(), u, eligible.keySet());
+                    if (target != null) { toRemove.add(u); continue; }
+                }
+            }
+
+            // Rewrite receiver calls → static invokes
+            if (stmt.containsInvokeExpr()
+                    && stmt.getInvokeExpr() instanceof InstanceInvokeExpr) {
+                InstanceInvokeExpr instInvoke = (InstanceInvokeExpr) stmt.getInvokeExpr();
+                if (instInvoke.getMethod().getName().equals("<init>")) continue;
+                Local base = (Local) instInvoke.getBase();
+
+                for (AllocObject obj : eligible.keySet()) {
+                    AllocObject target = resolveUniqueAllocTarget(base, u, eligible.keySet());
+                    if (target == null || !target.equals(obj)) continue;
+
+                    NewExpr newExpr = (NewExpr) ((AssignStmt) eligible.get(obj)).getRightOp();
+                    SootClass exactType = newExpr.getBaseType().getSootClass();
+                    SootMethod callee = exactType.getMethod(
+                        instInvoke.getMethod().getSubSignature());
+                    SootMethod sv = staticVariants.get(callee);
+                    if (sv == null) continue;
+
+                    List<SootField> fieldsUsed = methodFieldsUsed.get(callee);
+                    List<Value> newArgs = new ArrayList<>();
+                    for (SootField f : fieldsUsed)
+                        newArgs.add(fieldLocals.get(obj).get(f));
+                    newArgs.addAll(instInvoke.getArgs());
+
+                    stmt.getInvokeExprBox().setValue(
+                        Jimple.v().newStaticInvokeExpr(sv.makeRef(), newArgs));
+                    break;
+                }
+            }
+        }
+
+        // Step 7: Apply deferred inserts and removals
+        for (Map.Entry<Unit, List<Unit>> e : toInsertBefore.entrySet())
+            for (Unit init : e.getValue())
+                body.getUnits().insertBefore(init, e.getKey());
+        for (Unit u : toRemove)
+            body.getUnits().remove(u);
+    }
+
+    /**
+     * Pessimistic check: in the callee's body, 'this' must ONLY appear
+     * as the base of field reads (InstanceFieldRef on RHS).  Any other
+     * use — writes, copies, invokes, monitors, returns, identity checks —
+     * disqualifies the method.
+     */
+    private boolean isCalleeBodySafeForReceiverReplacement(SootMethod method) {
+        if (!method.isConcrete() || method.isJavaLibraryMethod()) return false;
+
+        Body b = method.getActiveBody();
+        Local thisLocal = b.getThisLocal();
+
+        for (Unit u : b.getUnits()) {
+            if (u instanceof IdentityStmt) continue;
+            Stmt stmt = (Stmt) u;
+
+            if (stmt instanceof AssignStmt) {
+                AssignStmt assign = (AssignStmt) stmt;
+                // this on LHS (reassignment or field write on this): reject
+                if (assign.getLeftOp().equals(thisLocal)) return false;
+                if (assign.getLeftOp() instanceof InstanceFieldRef
+                        && ((InstanceFieldRef) assign.getLeftOp()).getBase().equals(thisLocal))
+                    return false;
+                // this on RHS: only OK inside a field read
+                if (assign.getRightOp() instanceof InstanceFieldRef) {
+                    if (((InstanceFieldRef) assign.getRightOp()).getBase().equals(thisLocal))
+                        continue; // field read on this — allowed
+                }
+                // this copied to another local or used in any other expression
+                if (assign.getRightOp().equals(thisLocal)) return false;
+                for (ValueBox vb : assign.getRightOp().getUseBoxes())
+                    if (vb.getValue().equals(thisLocal)) return false;
+            }
+
+            // this as receiver or argument of any invoke: reject
+            if (stmt.containsInvokeExpr()) {
+                InvokeExpr inv = stmt.getInvokeExpr();
+                if (inv instanceof InstanceInvokeExpr
+                        && ((InstanceInvokeExpr) inv).getBase().equals(thisLocal))
+                    return false;
+                for (Value arg : inv.getArgs())
+                    if (arg.equals(thisLocal)) return false;
+            }
+
+            if (stmt instanceof ReturnStmt && ((ReturnStmt) stmt).getOp().equals(thisLocal))
+                return false;
+            if (stmt instanceof ThrowStmt && ((ThrowStmt) stmt).getOp().equals(thisLocal))
+                return false;
+            if (stmt instanceof EnterMonitorStmt
+                    && ((EnterMonitorStmt) stmt).getOp().equals(thisLocal))
+                return false;
+            if (stmt instanceof ExitMonitorStmt
+                    && ((ExitMonitorStmt) stmt).getOp().equals(thisLocal))
+                return false;
+            if (stmt instanceof IfStmt) {
+                Value cond = ((IfStmt) stmt).getCondition();
+                if (cond instanceof BinopExpr) {
+                    BinopExpr bin = (BinopExpr) cond;
+                    if (bin.getOp1().equals(thisLocal) || bin.getOp2().equals(thisLocal))
+                        return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /** Collect the ordered list of fields read on 'this' in a method body. */
+    private List<SootField> getFieldsAccessedOnThis(Body b) {
+        Local thisLocal = b.getThisLocal();
+        List<SootField> result = new ArrayList<>();
+        Set<SootField> seen = new LinkedHashSet<>();
+        for (Unit u : b.getUnits()) {
+            if (!(u instanceof AssignStmt)) continue;
+            Value rhs = ((AssignStmt) u).getRightOp();
+            if (rhs instanceof InstanceFieldRef) {
+                InstanceFieldRef ref = (InstanceFieldRef) rhs;
+                if (ref.getBase().equals(thisLocal) && seen.add(ref.getField()))
+                    result.add(ref.getField());
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Create a static copy of {@code original} whose 'this' parameter is
+     * replaced by explicit field parameters at the front of the parameter list.
+     *
+     * Uses {@link Body#importBodyContentsFrom} to clone the body, then:
+     *   - Removes the {@code @this} identity statement
+     *   - Shifts existing {@code @parameterN} refs by the field count
+     *   - Adds {@code @parameterN} identity stmts for each field parameter
+     *   - Replaces field reads on 'this' with the corresponding field parameter
+     */
+    private SootMethod createStaticVariant(SootMethod original, List<SootField> fieldsUsed) {
+        if (!original.isConcrete()) return null;
+
+        SootClass cls = original.getDeclaringClass();
+        Body origBody = original.getActiveBody();
+
+        // Build parameter types: field types first, then original params
+        List<Type> paramTypes = new ArrayList<>();
+        for (SootField f : fieldsUsed) paramTypes.add(f.getType());
+        paramTypes.addAll(original.getParameterTypes());
+
+        // Use a distinct name to avoid conflicts with the instance method
+        // (same subsignature when no fields are accessed on 'this')
+        String name = original.getName() + "_scalar";
+
+        // Check for existing method with this exact signature
+        try {
+            cls.getMethod(name, paramTypes, original.getReturnType());
+            return null; // conflict — skip
+        } catch (Exception ignored) {}
+
+        SootMethod staticMethod = new SootMethod(
+            name, paramTypes, original.getReturnType(),
+            Modifier.STATIC | Modifier.PUBLIC);
+        cls.addMethod(staticMethod);
+
+        // Clone the body
+        JimpleBody newBody = Jimple.v().newBody(staticMethod);
+        staticMethod.setActiveBody(newBody);
+        newBody.importBodyContentsFrom(origBody);
+
+        // Find 'this' local and its identity stmt in the cloned body
+        Local thisLocal = null;
+        Unit thisIdentity = null;
+        for (Unit u : newBody.getUnits()) {
+            if (u instanceof IdentityStmt) {
+                IdentityStmt id = (IdentityStmt) u;
+                if (id.getRightOp() instanceof ThisRef) {
+                    thisLocal = (Local) id.getLeftOp();
+                    thisIdentity = u;
+                    break;
+                }
+            }
+        }
+        if (thisLocal == null) { cls.removeMethod(staticMethod); return null; }
+
+        // Shift existing @parameterN refs by the number of field params
+        int fieldCount = fieldsUsed.size();
+        for (Unit u : newBody.getUnits()) {
+            if (u instanceof IdentityStmt) {
+                IdentityStmt id = (IdentityStmt) u;
+                if (id.getRightOp() instanceof ParameterRef) {
+                    ParameterRef ref = (ParameterRef) id.getRightOp();
+                    id.setRightOp(Jimple.v().newParameterRef(
+                        ref.getType(), ref.getIndex() + fieldCount));
+                }
+            }
+        }
+
+        // Create field parameter locals + identity stmts
+        Map<SootField, Local> fieldParamLocals = new LinkedHashMap<>();
+        List<Unit> fieldIdentities = new ArrayList<>();
+        int paramIdx = 0;
+        for (SootField f : fieldsUsed) {
+            Local pl = Jimple.v().newLocal("param_" + f.getName(), f.getType());
+            newBody.getLocals().add(pl);
+            fieldParamLocals.put(f, pl);
+            fieldIdentities.add(Jimple.v().newIdentityStmt(
+                pl, Jimple.v().newParameterRef(f.getType(), paramIdx++)));
+        }
+
+        // Insert field param identities where @this was, then remove @this
+        for (Unit id : fieldIdentities)
+            newBody.getUnits().insertBefore(id, thisIdentity);
+        newBody.getUnits().remove(thisIdentity);
+
+        // Replace field reads on 'this' with field parameter locals
+        for (Unit u : newBody.getUnits()) {
+            for (ValueBox vb : u.getUseBoxes()) {
+                if (vb.getValue() instanceof InstanceFieldRef) {
+                    InstanceFieldRef ref = (InstanceFieldRef) vb.getValue();
+                    if (ref.getBase().equals(thisLocal)) {
+                        Local fp = fieldParamLocals.get(ref.getField());
+                        if (fp != null) vb.setValue(fp);
+                    }
+                }
+            }
+        }
+
+        // Remove the 'this' local
+        newBody.getLocals().remove(thisLocal);
+
+        return staticMethod;
+    }
+
+    /* =============================================================
+     *  Shared helpers for scalar replacement
+     * ============================================================= */
 
     /**
      * If {@code value} is an {@link InstanceFieldRef} whose base local points

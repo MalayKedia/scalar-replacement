@@ -1,0 +1,1 @@
+Make sure it checks for init (whether it exists or not) before it marks it as scalar replacable. As of now, if it contains an nonempty init function , we should mark it as non scalar replacable
