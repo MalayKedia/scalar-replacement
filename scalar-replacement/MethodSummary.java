@@ -1,36 +1,93 @@
 import java.util.*;
+import soot.SootField;
 
 /**
- * Inter-procedural summary produced after analysing one method.
+ * Phase-1 summary of a method, indexed by parameter.
  *
- * Parameter indices follow a uniform scheme:
- *   - For instance methods: 0 = this, 1… = explicit parameters.
- *   - For static  methods:  0… = explicit parameters (no receiver).
+ * Param indices are uniform: for instance methods 0 = this and 1..k = explicit
+ * params; for static methods 0..k-1 = explicit params (no receiver).
  *
- * A caller looks up the callee's summary to learn which of the objects it
- * passes might escape or be modified, without re-analysing the callee.
+ * "Good" is the scalar-replacement contract for a single param position:
+ * the reference passed at that position does not escape, is never used for
+ * identity, and is only forwarded to callees whose corresponding param is
+ * also good. A caller that passes a scalar-replaceable object at a good
+ * position can safely rewrite the call via specialization.
  */
 public class MethodSummary {
 
-    /** Indices of parameters that may escape (stored to a static field, returned, etc.). */
-    final Set<Integer> escapingParams;
+    final int paramCount;
 
-    /** Indices of parameters whose own fields may be written to. */
-    final Set<Integer> modifiedParams;
+    /** Params that satisfy the contract. Derived from the bad sets. */
+    final Set<Integer> goodParams          = new HashSet<>();
 
-    /** Indices of parameters where a heap-reachable descendant's fields are written to. */
-    final Set<Integer> reachableModifiedParams;
+    /** Param ref flowed to return, static store, foreign field store, throw, thread capture, etc. */
+    final Set<Integer> escapingParams      = new HashSet<>();
 
-    /** For each parameter index, the set of source-line call sites the parameter flowed through. */
-    final Map<Integer, Set<Integer>> paramCallSites;
+    /** Param ref used in ==/!=/instanceof/synchronized/... */
+    final Set<Integer> identityUsedParams  = new HashSet<>();
 
-    MethodSummary(Set<Integer> escapingParams,
-                  Set<Integer> modifiedParams,
-                  Set<Integer> reachableModifiedParams,
-                  Map<Integer, Set<Integer>> paramCallSites) {
-        this.escapingParams         = escapingParams;
-        this.modifiedParams         = modifiedParams;
-        this.reachableModifiedParams = reachableModifiedParams;
-        this.paramCallSites         = paramCallSites;
+    /** Param forwarded to a callee position that isn't good. */
+    final Set<Integer> forwardedBadParams  = new HashSet<>();
+
+    /** Params whose reference may be returned by this method. */
+    final Set<Integer> returnAliases       = new HashSet<>();
+
+    /** Fields of param i written by direct stores in this method. */
+    final Map<Integer, Set<SootField>> directlyModifiedFields = new HashMap<>();
+
+    /** Fields of param i written via a forwarded call to a good callee. */
+    final Map<Integer, Set<SootField>> calleeModifiedFields   = new HashMap<>();
+
+    /** Fields of param i read (directly or transitively via good callees). */
+    final Map<Integer, Set<SootField>> readFields             = new HashMap<>();
+
+    public MethodSummary(int paramCount) {
+        this.paramCount = paramCount;
+    }
+
+    Set<SootField> directModified(int i) {
+        return directlyModifiedFields.getOrDefault(i, Collections.emptySet());
+    }
+
+    Set<SootField> calleeModified(int i) {
+        return calleeModifiedFields.getOrDefault(i, Collections.emptySet());
+    }
+
+    /** Union of direct and callee-mediated modifications to param i's fields. */
+    Set<SootField> allModified(int i) {
+        Set<SootField> r = new HashSet<>(directModified(i));
+        r.addAll(calleeModified(i));
+        return r;
+    }
+
+    Set<SootField> read(int i) {
+        return readFields.getOrDefault(i, Collections.emptySet());
+    }
+
+    /**
+     * Conservative summary used for unanalyzable callees: library methods,
+     * phantoms, and every member of a recursive SCC under the pessimistic
+     * fixpoint.
+     */
+    static MethodSummary allBad(int paramCount) {
+        MethodSummary s = new MethodSummary(paramCount);
+        for (int i = 0; i < paramCount; i++) {
+            s.escapingParams.add(i);
+            s.identityUsedParams.add(i);
+            s.forwardedBadParams.add(i);
+        }
+        return s;
+    }
+
+    /** After all bad sets are populated, derive goodParams as the complement. */
+    void finalizeGoodParams() {
+        goodParams.clear();
+        for (int i = 0; i < paramCount; i++) {
+            if (!escapingParams.contains(i)
+                    && !identityUsedParams.contains(i)
+                    && !forwardedBadParams.contains(i)) {
+                goodParams.add(i);
+            }
+        }
     }
 }

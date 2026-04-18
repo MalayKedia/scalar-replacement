@@ -1,69 +1,175 @@
 import java.util.*;
 import soot.*;
-import soot.jimple.*;
 import soot.jimple.toolkits.callgraph.*;
-import soot.toolkits.graph.*;
 
 /**
- * Whole-program scene transformer that drives the interprocedural analysis.
+ * Whole-program driver for Phase-1 summary computation.
  *
- * Starting from the program entry point, methods are visited in reverse
- * topological order of the call graph (callees before callers).  Each method
- * is analysed exactly once; the resulting {@link MethodSummary} is stored so
- * that callers can query it without re-analysing the callee.
+ * Order of operations:
+ *   1. Collect concrete user methods reachable from the entry point.
+ *   2. Compute SCCs on the induced call graph (Tarjan, reverse topological).
+ *   3. Visit SCCs in reverse topological order:
+ *        - recursive SCC (size > 1, or singleton with self-edge):
+ *              install {@link MethodSummary#allBad} for every member. This
+ *              is the pessimistic fixpoint — sound, strictly less precise
+ *              than the coinductive version.
+ *        - singleton non-recursive method:
+ *              run {@link PointerAnalysis}, store the resulting summary.
  *
- * Assumes a non-recursive program (no cycles in the call graph).
+ * All callee summaries are guaranteed to exist before a caller is analysed,
+ * so {@link PointerAnalysis} never encounters a missing entry for a reachable
+ * target.
  */
 public class AnalysisTransformer extends SceneTransformer {
 
     private final Map<SootMethod, MethodSummary> summaries = new HashMap<>();
-    private final Map<Integer, String> results = new TreeMap<>();
 
-    /** When false, skip the scalar replacement transformation (used for baseline benchmarks). */
+    /** Placeholder for Phase 3. Phase 1 does not mutate IR; this flag is unused
+     *  until transformation lands, but SootRunner still toggles it. */
     boolean enableTransformation = true;
 
     @Override
     protected void internalTransform(String phaseName, Map<String, String> options) {
         CallGraph cg = Scene.v().getCallGraph();
 
-        List<SootMethod> entries = Scene.v().getEntryPoints();
-        assert entries.size() == 1;
+        Set<SootMethod> reachable = collectReachable(cg);
+        List<List<SootMethod>> sccs = tarjan(reachable, cg);
 
-        analyzeMethod(entries.get(0), cg);
-
-        results.values().forEach(System.out::println);
-    }
-
-    /**
-     * Recursively analyse {@code method} and every method it calls.
-     *
-     * Callees are analysed first (via recursion), so by the time we build the
-     * {@link PointerAnalysis} for this method every callee summary is already
-     * available.
-     */
-    private void analyzeMethod(SootMethod method, CallGraph cg) {
-        if (!method.isConcrete() || method.isJavaLibraryMethod()) return;
-        if (summaries.containsKey(method)) return;
-
-        Body body = method.getActiveBody();
-
-        // Analyse callees first (reverse topological order)
-        for (Unit u : body.getUnits()) {
-            if (!((Stmt) u).containsInvokeExpr()) continue;
-            Iterator<Edge> edges = cg.edgesOutOf(u);
-            while (edges.hasNext()) analyzeMethod(edges.next().tgt(), cg);
+        for (List<SootMethod> scc : sccs) {
+            boolean recursive = scc.size() > 1 || hasSelfEdge(scc.get(0), cg);
+            if (recursive) {
+                for (SootMethod m : scc) {
+                    summaries.put(m, MethodSummary.allBad(paramCountOf(m)));
+                }
+                continue;
+            }
+            SootMethod m = scc.get(0);
+            try {
+                PointerAnalysis pa = new PointerAnalysis(m.getActiveBody(), cg, summaries);
+                summaries.put(m, pa.getSummary());
+            } catch (Exception e) {
+                summaries.put(m, MethodSummary.allBad(paramCountOf(m)));
+            }
         }
 
-        // Run the intra-procedural analysis
-        ExceptionalUnitGraph cfg = new ExceptionalUnitGraph(body);
-        PointerAnalysis analysis = new PointerAnalysis(cfg, body, cg, summaries);
+        printSummaries();
+    }
 
-        // Store summary for callers, collect scalar-replacement results
-        summaries.put(method, analysis.computeSummary());
-        results.putAll(analysis.getScalarReplacementResults());
+    /* =============================================================
+     *  Reachability
+     * ============================================================= */
 
-        // Transform: scalar-replace objects with no call sites
-        if (enableTransformation)
-            analysis.performScalarReplacement();
+    private Set<SootMethod> collectReachable(CallGraph cg) {
+        Set<SootMethod> visited = new HashSet<>();
+        Deque<SootMethod> work = new ArrayDeque<>(Scene.v().getEntryPoints());
+        while (!work.isEmpty()) {
+            SootMethod m = work.poll();
+            if (!visited.add(m)) continue;
+            Iterator<Edge> it = cg.edgesOutOf(m);
+            while (it.hasNext()) {
+                SootMethod tgt = it.next().tgt();
+                if (!visited.contains(tgt)) work.add(tgt);
+            }
+        }
+        visited.removeIf(m -> !isAnalyzable(m));
+        return visited;
+    }
+
+    private boolean isAnalyzable(SootMethod m) {
+        return m.isConcrete() && !m.isJavaLibraryMethod();
+    }
+
+    private boolean hasSelfEdge(SootMethod m, CallGraph cg) {
+        Iterator<Edge> it = cg.edgesOutOf(m);
+        while (it.hasNext()) if (it.next().tgt().equals(m)) return true;
+        return false;
+    }
+
+    private int paramCountOf(SootMethod m) {
+        return m.getParameterCount() + (m.isStatic() ? 0 : 1);
+    }
+
+    /* =============================================================
+     *  Tarjan's SCC algorithm
+     *
+     *  The SCCs appear in reverse topological order in the returned list
+     *  (a property of Tarjan), which is exactly what Phase 1 needs.
+     * ============================================================= */
+
+    private List<List<SootMethod>> tarjan(Set<SootMethod> nodes, CallGraph cg) {
+        TarjanState st = new TarjanState();
+        for (SootMethod m : nodes) {
+            if (!st.index.containsKey(m)) tarjanVisit(m, nodes, cg, st);
+        }
+        return st.result;
+    }
+
+    private void tarjanVisit(SootMethod v, Set<SootMethod> nodes, CallGraph cg,
+                             TarjanState st) {
+        st.index.put(v, st.counter);
+        st.lowlink.put(v, st.counter);
+        st.counter++;
+        st.stack.push(v);
+        st.onStack.add(v);
+
+        Iterator<Edge> it = cg.edgesOutOf(v);
+        while (it.hasNext()) {
+            SootMethod w = it.next().tgt();
+            if (!nodes.contains(w)) continue;
+            if (!st.index.containsKey(w)) {
+                tarjanVisit(w, nodes, cg, st);
+                st.lowlink.put(v, Math.min(st.lowlink.get(v), st.lowlink.get(w)));
+            } else if (st.onStack.contains(w)) {
+                st.lowlink.put(v, Math.min(st.lowlink.get(v), st.index.get(w)));
+            }
+        }
+
+        if (st.lowlink.get(v).equals(st.index.get(v))) {
+            List<SootMethod> scc = new ArrayList<>();
+            SootMethod w;
+            do {
+                w = st.stack.pop();
+                st.onStack.remove(w);
+                scc.add(w);
+            } while (!w.equals(v));
+            st.result.add(scc);
+        }
+    }
+
+    private static class TarjanState {
+        final Map<SootMethod, Integer> index   = new HashMap<>();
+        final Map<SootMethod, Integer> lowlink = new HashMap<>();
+        final Set<SootMethod> onStack          = new HashSet<>();
+        final Deque<SootMethod> stack          = new ArrayDeque<>();
+        final List<List<SootMethod>> result    = new ArrayList<>();
+        int counter = 0;
+    }
+
+    /* =============================================================
+     *  Debug output
+     * ============================================================= */
+
+    private void printSummaries() {
+        List<SootMethod> ordered = new ArrayList<>(summaries.keySet());
+        ordered.sort(Comparator.comparing(SootMethod::getSignature));
+        for (SootMethod m : ordered) {
+            MethodSummary s = summaries.get(m);
+            System.out.println(m.getSignature());
+            System.out.println("  paramCount = " + s.paramCount);
+            System.out.println("  goodParams = " + sorted(s.goodParams));
+            System.out.println("  escaping   = " + sorted(s.escapingParams));
+            System.out.println("  identity   = " + sorted(s.identityUsedParams));
+            System.out.println("  fwdBad     = " + sorted(s.forwardedBadParams));
+            System.out.println("  retAlias   = " + sorted(s.returnAliases));
+            System.out.println("  dirMod     = " + s.directlyModifiedFields);
+            System.out.println("  calMod     = " + s.calleeModifiedFields);
+            System.out.println("  read       = " + s.readFields);
+        }
+    }
+
+    private static List<Integer> sorted(Set<Integer> s) {
+        List<Integer> l = new ArrayList<>(s);
+        Collections.sort(l);
+        return l;
     }
 }
