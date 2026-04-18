@@ -1,1 +1,7 @@
 Make sure it checks for init (whether it exists or not) before it marks it as scalar replacable. As of now, if it contains an nonempty init function , we should mark it as non scalar replacable
+
+if the object is put as a field of another object, then that object should not be scalar replaced.
+
+We have to check if our code currently scalar replaces classes which have a static variable, aka only the other fields should be made as variables, static must be accessed directly from class.
+
+objects passed to static variables cannot be scalar replaced (they have escaped)
