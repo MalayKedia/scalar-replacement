@@ -20,6 +20,13 @@ import soot.jimple.*;
  *   - copy all other units, substituting renamed locals.
  *
  * Object.&lt;init&gt; is treated as a no-op terminator.
+ *
+ * Control-flow handling: every original unit in the constructor body gets
+ * mapped to exactly one emitted unit (a {@link NopStmt} placeholder when
+ * we'd otherwise drop the statement). After inlining, {@link #fixupUnitBoxes}
+ * walks the emitted chain and rewires every branch target via this map so
+ * any {@code if}/{@code goto}/{@code switch} inside the constructor points
+ * at the correct emitted statement, not the dangling original.
  */
 public class InitInliner {
 
@@ -27,16 +34,14 @@ public class InitInliner {
     private final Map<SootField, Local> scalars;
     private final Specializer specializer;
     private final List<Unit> emitted = new ArrayList<>();
+    /** orig constructor unit → the single emitted unit that represents it. */
+    private final Map<Unit, Unit> origToEmitted = new HashMap<>();
 
     /**
      * Counter for renaming cloned locals to avoid collision with the caller
      * or with other allocations in the same body. Static so every
      * {@code sr_il<n>_<origName>} synthesized in this JVM session has a
-     * unique {@code n} — two allocations in one method body each construct
-     * their own {@link InitInliner} instance, so a per-instance counter
-     * would reset and cause name collisions (observed as
-     * "Register contains wrong type" verifier errors with duplicate locals
-     * of different types).
+     * unique {@code n}.
      */
     private static int renameCounter = 0;
 
@@ -49,18 +54,12 @@ public class InitInliner {
 
     public List<Unit> getEmitted() { return emitted; }
 
-    /**
-     * Inline the chain starting at index 0 (X.&lt;init&gt;). The outermost
-     * constructor's actuals come from {@code initCall}. As we encounter the
-     * super/delegated call inside its body, we recurse to the next level
-     * and the super's actuals come from that invoke's args at that recursion
-     * frame. {@code Object.<init>} is skipped (no body worth inlining).
-     */
     public void inlineChain(List<SootMethod> chain, Stmt initCall) {
         if (chain.isEmpty()) return;
         InvokeExpr invoke = initCall.getInvokeExpr();
         List<Value> actuals = new ArrayList<>(invoke.getArgs());
         inlineOne(chain, 0, actuals);
+        fixupUnitBoxes();
     }
 
     private void inlineOne(List<SootMethod> chain, int idx, List<Value> actuals) {
@@ -83,91 +82,126 @@ public class InitInliner {
             localMap.put(orig, fresh);
         }
         Local thisLocal = cBody.getThisLocal();
-        // Compute which locals may alias thisLocal in this constructor's body
-        // — a trivial copy/cast closure — so we can rewrite field accesses
-        // through copies, not just the thisLocal itself.
         Set<Local> thisAliases = computeThisAliases(cBody, thisLocal);
 
-        // Walk units and emit transformed versions.
         for (Unit u : cBody.getUnits()) {
             Stmt s = (Stmt) u;
 
             if (s instanceof IdentityStmt) {
                 IdentityStmt id = (IdentityStmt) s;
                 Value rhs = id.getRightOp();
-                if (rhs instanceof ThisRef) continue;
+                if (rhs instanceof ThisRef) {
+                    // Drop, but leave a nop placeholder for possible branches.
+                    emitMapped(u, Jimple.v().newNopStmt());
+                    continue;
+                }
                 if (rhs instanceof ParameterRef) {
                     int pIdx = ((ParameterRef) rhs).getIndex();
-                    if (pIdx >= actuals.size()) continue;
                     Local lhs = localMap.get((Local) id.getLeftOp());
-                    emitted.add(Jimple.v().newAssignStmt(lhs, actuals.get(pIdx)));
+                    if (pIdx >= actuals.size()) {
+                        emitMapped(u, Jimple.v().newNopStmt());
+                    } else {
+                        emitMapped(u, Jimple.v().newAssignStmt(
+                            lhs, actuals.get(pIdx)));
+                    }
                     continue;
                 }
                 // @caughtexception — carry through (rename lhs)
                 Local lhs = localMap.get((Local) id.getLeftOp());
-                emitted.add(Jimple.v().newIdentityStmt(lhs, rhs));
+                emitMapped(u, Jimple.v().newIdentityStmt(lhs, rhs));
                 continue;
             }
 
             // super.<init>/this.<init> call — replace with next-level inlining.
+            // Emit a nop first so any branch that targeted this call in the
+            // orig body has a valid target; the recursion then appends the
+            // super body's emitted units after it, and fall-through works.
             if (s.containsInvokeExpr()
                     && s.getInvokeExpr() instanceof SpecialInvokeExpr
                     && s.getInvokeExpr().getMethodRef().getName().equals("<init>")) {
                 SpecialInvokeExpr si = (SpecialInvokeExpr) s.getInvokeExpr();
                 if (si.getBase() instanceof Local
                         && thisAliases.contains(si.getBase())) {
+                    emitMapped(u, Jimple.v().newNopStmt());
                     List<Value> superActuals = new ArrayList<>();
-                    for (Value a : si.getArgs()) superActuals.add(substitute(a, localMap));
+                    for (Value a : si.getArgs())
+                        superActuals.add(substitute(a, localMap));
                     inlineOne(chain, idx + 1, superActuals);
                     continue;
                 }
             }
 
             if (s instanceof ReturnVoidStmt || s instanceof ReturnStmt) {
-                continue;  // constructor's implicit return — don't propagate
+                // Constructor return — we're splicing inline, so this is a
+                // no-op; placeholder preserves any branch target.
+                emitMapped(u, Jimple.v().newNopStmt());
+                continue;
             }
 
-            // AssignStmt — check for field accesses on aliased-this.
             if (s instanceof AssignStmt) {
                 AssignStmt a = (AssignStmt) s;
                 Value lhs = a.getLeftOp();
                 Value rhs = a.getRightOp();
 
-                // this.f = rhs  →  scalar_f = substitute(rhs)
+                // this.f = rhs → scalar_f = substitute(rhs)
                 if (lhs instanceof InstanceFieldRef) {
                     InstanceFieldRef ref = (InstanceFieldRef) lhs;
                     if (ref.getBase() instanceof Local
                             && thisAliases.contains(ref.getBase())) {
                         Local sl = scalars.get(ref.getField());
                         if (sl != null) {
-                            emitted.add(Jimple.v().newAssignStmt(
+                            emitMapped(u, Jimple.v().newAssignStmt(
                                 sl, substitute(rhs, localMap)));
                             continue;
                         }
                     }
                 }
-                // lhs = this.f  →  lhs = scalar_f
+                // lhs = this.f → lhs = scalar_f
                 if (rhs instanceof InstanceFieldRef) {
                     InstanceFieldRef ref = (InstanceFieldRef) rhs;
                     if (ref.getBase() instanceof Local
                             && thisAliases.contains(ref.getBase())) {
                         Local sl = scalars.get(ref.getField());
                         if (sl != null) {
-                            emitted.add(Jimple.v().newAssignStmt(
+                            emitMapped(u, Jimple.v().newAssignStmt(
                                 substitute(lhs, localMap), sl));
                             continue;
                         }
                     }
                 }
-                // If lhs is a plain local that's in thisAliases (a copy of
-                // this), drop — aliases no longer matter once rewritten.
-                if (lhs instanceof Local && thisAliases.contains(lhs)) continue;
+                // Copy into a this-alias — drop to nop (aliases are meaningless now).
+                if (lhs instanceof Local && thisAliases.contains(lhs)) {
+                    emitMapped(u, Jimple.v().newNopStmt());
+                    continue;
+                }
             }
 
             // Generic fallback: clone with renamed locals.
             Unit clone = (Unit) s.clone();
             substituteInUnit(clone, localMap);
-            emitted.add(clone);
+            emitMapped(u, clone);
+        }
+    }
+
+    /** Append {@code emit} to the output list and record the mapping
+     *  {@code orig → emit}. */
+    private void emitMapped(Unit orig, Unit emit) {
+        emitted.add(emit);
+        origToEmitted.put(orig, emit);
+    }
+
+    /**
+     * After all emission, walk emitted units and retarget every UnitBox
+     * (branch / goto / switch target) that still points at an original
+     * constructor unit to the corresponding emitted unit.
+     */
+    private void fixupUnitBoxes() {
+        for (Unit u : emitted) {
+            for (UnitBox box : u.getUnitBoxes()) {
+                Unit target = box.getUnit();
+                Unit mapped = origToEmitted.get(target);
+                if (mapped != null) box.setUnit(mapped);
+            }
         }
     }
 
