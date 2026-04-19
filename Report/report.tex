@@ -93,7 +93,7 @@ Both passes are may-alias forward dataflow analyses. Our analysis is Flow-sensit
 
 \textbf{Pass-3: IR rewrite.} For every surviving allocation we create
 one fresh local per accessed field, named
-\texttt{srO$<$line$>$\_$<$idx$>$\_$<$field$>$}. Before the
+\texttt{srO<line>\_<idx>\_<field>}. Before the
 inlined constructor runs we splice in default-value writes to each of
 these scalars (zero/null/false) so reads that precede an explicit
 write behave like a freshly-allocated heap object.
@@ -101,7 +101,7 @@ write behave like a freshly-allocated heap object.
 The constructor chain (validated by Pass 2 to be well-behaved) is then
 inlined at the allocation site by \texttt{InitInliner}. For each level
 of the chain we clone every local with the unique name
-\texttt{sr\_il$<$counter$>$\_$<$origName$>$}. Identity statements for
+\texttt{sr\_il<counter>\_<origName>}. Identity statements for
 \texttt{@this} are dropped; \texttt{@parameterN} becomes a direct
 \texttt{local = actual} binding; a \texttt{this.f = v} store in the
 constructor becomes \texttt{sr\_f = v}; a super-\texttt{<init>} call
@@ -120,10 +120,10 @@ Non-\texttt{<init>} calls receiving the allocation become staticinvokes
 of a synthesised specialisation produced by \texttt{Specializer}. The
 specialisation is keyed on \texttt{(callee, set of scalarised
 positions)}. Its name is
-\texttt{$<$origName$>$\$scalar\_$<$positions$>$} (e.g.\
+\texttt{<origName>\$scalar\_<positions>} (e.g.\
 \texttt{foo\$scalar\_0\_1}). Each scalarised reference parameter in the
 signature expands into one primitive/ref parameter per field the callee
-reads, named \texttt{srP$<$pos$>$\_$<$field$>$}; non-scalarised
+reads, named \texttt{srP<pos>\_<field>}; non-scalarised
 parameters pass through unchanged. We clone the body with
 \texttt{Body.importBodyContentsFrom}, rewrite \texttt{@this}/\texttt{@parameter} identity
 statements to match the widened signature, replace field reads on
@@ -144,8 +144,8 @@ easy cases — single escape point on a branch, no post-escape field writes,
 simple constructors without static side effects — were clean. But as soon
 as we tried to combine them (multi-escape paths, control-flow joins where
 some predecessors had materialized and some hadn't, constructors with
-`counter++` style side effects that would double-execute if we called
-`<init>` at materialization) we ran into cases where a particular design
+\texttt{counter++} style side effects that would double-execute if we called
+\texttt{<init>} at materialization) we ran into cases where a particular design
 choice was either too strict (giving up on obviously-safe cases) or too
 loose (producing semantically wrong output on testcases we couldn't
 enumerate in advance). We got to a point where each fix for one shape
@@ -158,22 +158,22 @@ reintroduced a failure on another.
  includes an automatic correctness check: the stdout of the baseline and
  the optimized run must match byte-for-byte before the timing is recorded.
 
- \begin{table}[h]
+ \begin{table}[h!]
  \centering
  \small
  \begin{tabular}{r l r r r r}
  \toprule
  \textbf{Test} & \textbf{Scenario} & \textbf{Allocs} & \textbf{Base (ms)} & \textbf{Opt (ms)} & \textbf{Speedup} \\
  \midrule
- 1  & Simplest --- one alloc, one field        & 1 &  736 &  184 & \textbf{75\%} \\
- 2  & Multi-field + constructor arg            & 1 &  909 &  311 & \textbf{65\%} \\
+ 1  & one alloc and one field        & 1 &  736 &  184 & \textbf{75\%} \\
+ 2  & Multi-field with constructor arg            & 1 &  909 &  311 & \textbf{65\%} \\
  3  & Passed to good-callee helper             & 2 &  936 &  356 & \textbf{61\%} \\
  4  & Nested specialization (two levels)       & 2 & 1246 &  606 & \textbf{51\%} \\
  5  & Three-level super chain                  & 1 & 1426 &  379 & \textbf{73\%} \\
- 6  & Negative --- identity use                & 0 &  507 &  489 & 3\% \\
- 7  & Negative --- mutating callee             & 1 &  964 &  922 & 4\% \\
+ 6  & Negative case: identity use                & 0 &  507 &  489 & 3\% \\
+ 7  & Negative case: mutating callee             & 1 &  964 &  922 & 4\% \\
  8  & Virtual dispatch devirtualized           & 1 & 1201 &  375 & \textbf{68\%} \\
- 9  & Negative --- heap escape                 & 1 &  140 &  141 & 0\% \\
+ 9  & Negative case: heap escape                 & 1 &  140 &  141 & 0\% \\
  10 & Cross / dot vector pipeline              & 4 & 3796 & 2103 & \textbf{44\%} \\
  \bottomrule
  \end{tabular}
