@@ -91,16 +91,45 @@ Both passes are may-alias forward dataflow analyses. Our analysis is Flow-sensit
 
 \section{How do we transform the code?}
 
-\textbf{Pass-3: IR rewrite}: For every surviving allocation we create one
-fresh local per accessed field (\texttt{srO<line>\_<idx>\_<field>}), splice the
-inlined constructor chain into the allocation site so the scalar locals
-get the right initial values, delete the \texttt{new X;} and the
-\texttt{specialinvoke <init>} statements, rewrite every field access on any local
-aliasing the alloc to the corresponding scalar local, and rewrite each
-helper call that receives the alloc into a call to a specialized static
-method that takes the scalar fields in place of the reference.
-Specialization is cached, and nested calls inside a specialized body that
-forward the scalarized parameter are rewritten recursively.
+\textbf{Pass-3: IR rewrite.} For every surviving allocation we create
+one fresh local per accessed field, named
+\texttt{srO$<$line$>$\_$<$idx$>$\_$<$field$>$}. Before the
+inlined constructor runs we splice in default-value writes to each of
+these scalars (zero/null/false) so reads that precede an explicit
+write behave like a freshly-allocated heap object.
+
+The constructor chain (validated by Pass 2 to be well-behaved) is then
+inlined at the allocation site by \texttt{InitInliner}. For each level
+of the chain we clone every local with the unique name
+\texttt{sr\_il$<$counter$>$\_$<$origName$>$}. Identity statements for
+\texttt{@this} are dropped; \texttt{@parameterN} becomes a direct
+\texttt{local = actual} binding; a \texttt{this.f = v} store in the
+constructor becomes \texttt{sr\_f = v}; a super-\texttt{<init>} call
+on \texttt{this} is replaced by a \texttt{NopStmt} and the recursion
+splices the super's translated body in its place. Every dropped
+statement leaves a \texttt{NopStmt} placeholder. The
+\texttt{new X;} and the original \texttt{<init>} call are deleted and
+insertion is just before the \texttt{<init>} invoke.
+
+After the alloc-site rewrite we walk the rest of the caller body:
+every field access whose base unambiguously aliases a scalar-replaced
+allocation (per Pass 2's flow-sensitive \texttt{AllocState}) is
+redirected to the matching scalar local.
+
+Non-\texttt{<init>} calls receiving the allocation become staticinvokes
+of a synthesised specialisation produced by \texttt{Specializer}. The
+specialisation is keyed on \texttt{(callee, set of scalarised
+positions)}. Its name is
+\texttt{$<$origName$>$\$scalar\_$<$positions$>$} (e.g.\
+\texttt{foo\$scalar\_0\_1}). Each scalarised reference parameter in the
+signature expands into one primitive/ref parameter per field the callee
+reads, named \texttt{srP$<$pos$>$\_$<$field$>$}; non-scalarised
+parameters pass through unchanged. We clone the body with
+\texttt{Body.importBodyContentsFrom}, rewrite \texttt{@this}/\texttt{@parameter} identity
+statements to match the widened signature, replace field reads on
+aliases of the scalarised parameter with reads of the corresponding
+\texttt{srP} local, and recursively specialise any nested invoke
+that forwards a scalarised parameter.
 
 
 \section{Partial scalar replacement: what we tried and why we dropped it}
