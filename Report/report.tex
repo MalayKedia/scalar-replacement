@@ -44,7 +44,7 @@ which parameters escape (return, throw, stored to static or to another
 object's field), which are used for identity (`==`, `!=`, `instanceof`,
 `synchronized`), which are forwarded to callees whose parameters are
 themselves bad, which fields of each parameter are read, and which are
-written. A caller checks the method summary to determine if it can scalar-replace an argument. Phase 1 runs in reverse topological order of the call-graph SCCs
+written. A caller checks the method summary to determine if it can scalar-replace an argument. Pass 1 runs in reverse topological order of the call-graph SCCs
 computed by Tarjan, with pessimistic handling of cycles: every method in a
 non-singleton SCC is marked fully bad and stays that way.
 
