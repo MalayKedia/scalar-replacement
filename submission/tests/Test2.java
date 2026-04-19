@@ -1,7 +1,8 @@
 /*
-This is a slight modification of Test1, where we demonstrate that we can handle multiple fields and constructor arguments. 
-We should still scalar-replace the allocation and eliminate the field reads, leaving just integer additions in the loop.
-*/
+ * Two fields and a constructor that computes one from the other. Both
+ * fields become plain int locals and the <init> body gets inlined at the
+ * allocation site.
+ */
 
 
 class A { 
@@ -16,13 +17,13 @@ class A {
 
 public class Test2 {
     public static void main(String[] args) {
-        int sum1 = 0;
-        int sum2 = 0;
+        long sum1 = 0;
+        long sum2 = 0;
         for (int i = 0; i < 10000000; i++) {
-            A a = new A(i);
+            A a = new A(i+2); // scalar-replaced
             sum1 += a.val;
             sum2 += a.y;
         }
-        System.out.println(sum1 + sum2);
+        System.out.println(sum1 + sum2);  // 100000000000000
     }
 }

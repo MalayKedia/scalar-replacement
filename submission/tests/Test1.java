@@ -1,7 +1,8 @@
 /*
-This is a simple test that allocates an object in a loop and reads from it.
-We should scalar-replace the allocation and eliminate the field read, leaving just an integer addition in the loop.
-*/
+ * Simplest case — one allocation per iteration, written once, read once.
+ * Expect the new A() and the field access to both disappear, leaving an
+ * integer add in the loop body.
+ */
 
 
 class A { 
@@ -10,12 +11,12 @@ class A {
 
 public class Test1 {
     public static void main(String[] args) {
-        int sum = 0;
+        long sum = 0;
         for (int i = 0; i < 10000000; i++) {
-            A a = new A();
+            A a = new A(); // scalar-replaced
             a.val = i;
             sum += a.val;
         }
-        System.out.println(sum);
+        System.out.println(sum);  // 49999995000000
     }
 }

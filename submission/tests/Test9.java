@@ -1,19 +1,7 @@
 /*
- * Negative test — heap escape via storing a reference into another object's
- * field.
- *
- * Inside the loop, A n is freshly allocated and immediately written into
- * B l's `a` field (`l.a = n`). Our heap-store disqualifier fires:
- * any param/alloc ref used as the RHS of a field store is marked as
- * escaping, so A allocations are not replaceable.
- *
- * The B allocation itself is harmless (only has writes to its own
- * `a` field, nothing escapes, no identity use), so the analyzer still
- * reports `l` as Y[] — a nice demonstration that the disqualifier targets
- * the escaping value, not the base.
- *
- * Expected: exactly one Y[] verdict (for the B, allocated outside the
- * loop); the per-iteration A allocation survives as a `new`.
+ * Negative test. We store the reference n into b.a, letting n escape into
+ * the heap. n can't be scalar-replaced after that. b itself is fine — it
+ * never escapes, so the outer allocation still gets the Y treatment.
  */
 
 class A {
@@ -27,13 +15,13 @@ class B {
 
 public class Test9 {
     public static void main(String[] args) {
-        B l = new B();
+        B b = new B(); // scalar-replaced
         long sum = 0;
         for (int i = 0; i < 1000000; i++) {
-            A n = new A(i);
-            l.a = n;          // heap store of n's ref → disqualifies n
+            A n = new A(i); // cannot be scalar-replaced, since its ref is stored in b.a
+            b.a = n; // heap store of n's ref disqualifies n
             sum += n.v;
         }
-        System.out.println(sum);
+        System.out.println(sum);  // 499999500000
     }
 }

@@ -1,17 +1,8 @@
 /*
- * Two distinct allocations per iteration feeding a specialized helper that
- * takes both.
- *
- * Vec2Ops.dot reads from two Vec2 params; Vec2Ops.sum reads from one.
- * Phase-3 specializes each helper against the scalarized-position set
- * implied by the call site:
- *   dot → dot$scalar_0_1_2(int, int, int, int)  (receiver's zero fields,
- *                                                 then u.x, u.y, v.x, v.y)
- *   sum → sum$scalar_0_1(int, int)               (u.x, u.y)
- * Both Vec2 allocations AND the Vec2Ops receiver are eliminated; the
- * transformed loop body is pure integer arithmetic.
- *
- * Expected: three Y[...] verdicts (two Vec2s + the Vec2Ops receiver).
+ * Bigger scenario. Two Vec3s built per iteration, handed to a helper
+ * with cross/dot. u and v get scalar-replaced; the Vec3 that cross
+ * returns stays a real ref (it's allocated inside cross), and the dot
+ * call that uses it gets specialised only on u.
  */
 
 class Vec3 {
@@ -37,14 +28,15 @@ class Vec3Ops {
 
 public class Test10 {
     public static void main(String[] args) {
-        Vec3Ops ops = new Vec3Ops();
-        int sum = 0;
+        Vec3Ops ops = new Vec3Ops(); // scalar-replaced
+        long sum = 0;
         for (int i = 0; i < 10000000; i++) {
-            Vec3 u = new Vec3(i, i + 1, i + 2);
-            Vec3 v = new Vec3(i + 3, i + 4, i + 5);
-            Vec3 w = ops.cross(u, v);
-            sum += ops.dot(w, u);
+            Vec3 u = new Vec3(i, 3*i + 1, i + 2); // scalar-replaced
+            Vec3 v = new Vec3(i + 3, i + 4, 2*i + 5); // scalar-replaced
+            Vec3 w = ops.cross(u, v); // transformed to cross$scalar_0_1_2
+            Vec3 z = new Vec3(i+5, 2*i+6, 3*i+7); // scalar-replaced
+            sum += ops.dot(w, z); // transformed to dot$scalar_0_2
         }
-        System.out.println(sum);
+        System.out.println(sum);  // -10496486156736
     }
 }

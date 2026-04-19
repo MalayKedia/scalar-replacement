@@ -1,7 +1,8 @@
 /*
-Here, we demonstrate that we can scalar-replace both objects o22 and o25, even though o25 is passed as an argument to a method call.
-We succesfully convert the call of b.addTo(a, 5) to a new static call addTo$scalar_0_1(a_x, 5), which allows us to eliminate the allocation of a and the field read of a.x.
-*/
+ * Here a is passed to B.addTo, which only reads a.x. Since the callee
+ * doesn't mutate or hold on to the reference, we specialise addTo to take
+ * the field as an int — both B and A are scalar-replaced.
+ */
 
 class A{
     int x;
@@ -19,12 +20,12 @@ class B {
 
 public class Test3 {
     public static void main(String[] args) {
-        B b = new B(); // o22
-        int sum = 0;
+        B b = new B(); // scalar-replaced
+        long sum = 0;
         for (int i = 0; i < 10000000; i++) {
-            A a = new A(i); // o25
+            A a = new A(i); // scalar-replaced
             sum += b.addTo(a, 5); // transformed to addTo$scalar_0_1
         }
-        System.out.println(sum);
+        System.out.println(sum);  // 50000045000000
     }
 }
