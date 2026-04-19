@@ -2,28 +2,12 @@ import java.util.*;
 import soot.*;
 import soot.jimple.*;
 
-/**
- * Phase-3 IR transformation. Runs per method, after Phase 2 verdicts.
- *
- * For each scalar-replaceable allocation in a method:
- *   1. Create fresh scalar locals (one per field in fieldsUsed).
- *   2. Emit default-value initializers at the allocation site so reads
- *      before the first write see the Java zero (objects start zero-filled;
- *      bare Jimple locals do not).
- *   3. Inline the constructor chain, rewriting {@code this.f = v} stores
- *      to scalar-local assignments. The super call chain is expanded
- *      recursively; {@code Object.<init>} is dropped.
- *   4. Delete the {@code new X} and the {@code specialinvoke <init>}.
- *   5. Rewrite every direct field access (in the caller body) on any local
- *      aliasing the allocation to the corresponding scalar local.
- *   6. Rewrite helper call sites that receive the allocation into calls of
- *      a specialized (field-taking static) variant of the callee.
- */
-public class Phase3Transformer {
+//Pass 3: Here we actually make the changes in the jimple IR
+public class CodeTransformer {
 
     private final Specializer specializer;
 
-    public Phase3Transformer(Specializer specializer) {
+    public CodeTransformer(Specializer specializer) {
         this.specializer = specializer;
     }
 
@@ -32,7 +16,7 @@ public class Phase3Transformer {
         if (allocs.isEmpty()) return;
         Body body = m.getActiveBody();
 
-        // Per-alloc scalar locals, keyed by the allocation and field.
+        //map containing the scalar local for each field of each replaceable alloc
         Map<ReplaceableAlloc, Map<SootField, Local>> scalarsPerAlloc = new LinkedHashMap<>();
         int allocIdx = 0;
         for (ReplaceableAlloc ra : allocs) {
@@ -48,59 +32,43 @@ public class Phase3Transformer {
             allocIdx++;
         }
 
-        // Plan edits: units to remove, and lists of units to insert before given anchor units.
+        //we remove and add units only in the end.
         Set<Unit> toRemove = new HashSet<>();
         Map<Unit, List<Unit>> toInsertBefore = new LinkedHashMap<>();
 
-        // Step 1–4: at each alloc site, materialize default-value inits and
-        // inlined constructor body; schedule the new & <init> for removal.
+        // Recurse the constructor chain and convert to scalar fields.
         for (ReplaceableAlloc ra : allocs) {
             Map<SootField, Local> scalars = scalarsPerAlloc.get(ra);
 
             List<Unit> emitted = new ArrayList<>();
 
-            // Default values so unwritten fields read as Java zero.
+            // Default value in java is 0
             for (Map.Entry<SootField, Local> e : scalars.entrySet()) {
                 emitted.add(Jimple.v().newAssignStmt(
                     e.getValue(), defaultValue(e.getValue().getType())));
             }
 
-            // Inline the constructor chain (X.<init> outermost).
             InitInliner inliner = new InitInliner(body, scalars, specializer);
             inliner.inlineChain(ra.initChain, (InvokeStmt) toInvokeStmt(ra.initCall));
             emitted.addAll(inliner.getEmitted());
-
-            // Splice the scalar-init block in just BEFORE the <init>
-            // invoke, not before the `new` — Jimple typically emits the
-            // <init>'s argument-evaluation statements between the `new`
-            // and the `specialinvoke`, so the inlined constructor body's
-            // references to those actuals must come after them in the
-            // unit chain.
-            toInsertBefore.put(ra.initCall, emitted);
+            toInsertBefore.put(ra.initCall, emitted); //inserting the code between the old new statement and the init statement
             toRemove.add(ra.site);
             toRemove.add(ra.initCall);
         }
 
-        // Step 5: rewrite direct field accesses in the caller body.
+        //Rewriting Field Accesses
         for (Unit u : new ArrayList<>(body.getUnits())) {
             if (toRemove.contains(u)) continue;
             rewriteDirectFieldAccess(u, allocs, scalarsPerAlloc, analysis);
         }
 
-        // Step 6: rewrite helper call sites.
-        // A single call site may have multiple arg positions each aliasing a
-        // different replaceable alloc (e.g., o3.foo(o2) — receiver is one
-        // alloc, arg is another). We need to rewrite each call site exactly
-        // once with the FULL set of scalarized positions, otherwise the
-        // second rewrite would clobber the first.
+        //Rewriting call sites of methods (This has to be done only once per call site, so we collect the relevant call sites for all allocs and rewrite them together to avoid conflicts)
         Map<Unit, Map<Integer, ReplaceableAlloc>> callSiteMap = new LinkedHashMap<>();
         for (ReplaceableAlloc ra : allocs) {
-            for (Unit cs : ra.helperCallSites) {
+            for (Unit cs : ra.CalleeCallSites) {
                 if (toRemove.contains(cs)) continue;
                 for (int pos : positionsAliasing(cs, ra, analysis)) {
-                    callSiteMap
-                        .computeIfAbsent(cs, k -> new TreeMap<>())
-                        .put(pos, ra);
+                    callSiteMap.computeIfAbsent(cs, k -> new TreeMap<>()).put(pos, ra);
                 }
             }
         }
@@ -108,17 +76,14 @@ public class Phase3Transformer {
             rewriteCallSite(e.getKey(), e.getValue(), scalarsPerAlloc);
         }
 
-        // Apply edits.
+        //Make the changes in the body
         for (Map.Entry<Unit, List<Unit>> e : toInsertBefore.entrySet()) {
             for (Unit n : e.getValue()) body.getUnits().insertBefore(n, e.getKey());
         }
         for (Unit u : toRemove) body.getUnits().remove(u);
     }
 
-    /* =============================================================
-     *  Field access rewriting in the caller body
-     * ============================================================= */
-
+    //only cases are (IFR on left) and (local on left and IFR on right) 
     private void rewriteDirectFieldAccess(
             Unit u, List<ReplaceableAlloc> allocs,
             Map<ReplaceableAlloc, Map<SootField, Local>> scalarsPerAlloc,
@@ -129,7 +94,6 @@ public class Phase3Transformer {
         Value lhs = assign.getLeftOp();
         Value rhs = assign.getRightOp();
 
-        // $r.f = v  →  scalar_f = v
         if (lhs instanceof InstanceFieldRef) {
             InstanceFieldRef ref = (InstanceFieldRef) lhs;
             ReplaceableAlloc owner = findAllocForBase(ref.getBase(), u, allocs, analysis);
@@ -139,7 +103,6 @@ public class Phase3Transformer {
             }
         }
 
-        // v = $r.f  →  v = scalar_f
         if (rhs instanceof InstanceFieldRef) {
             InstanceFieldRef ref = (InstanceFieldRef) rhs;
             ReplaceableAlloc owner = findAllocForBase(ref.getBase(), u, allocs, analysis);
@@ -150,11 +113,7 @@ public class Phase3Transformer {
         }
     }
 
-    /**
-     * If {@code base} at the program point before {@code u} is unambiguously
-     * the allocation for exactly one {@code ReplaceableAlloc}, return it.
-     * Ambiguous or no-match → null (we can't rewrite safely).
-     */
+    //Scalar replacement only applies when locals are unambiguously aliases of the replaceable alloc
     private ReplaceableAlloc findAllocForBase(Value base, Unit u,
             List<ReplaceableAlloc> allocs, AllocationAnalysis analysis) {
         if (!(base instanceof Local)) return null;
@@ -168,12 +127,6 @@ public class Phase3Transformer {
         return null;
     }
 
-    /* =============================================================
-     *  Helper call-site rewriting (specialization)
-     * ============================================================= */
-
-    /** Positions (in the uniform-indexed actuals list) at which {@code cs}'s
-     *  actual is unambiguously an alias of {@code ra.site}. */
     private List<Integer> positionsAliasing(Unit cs, ReplaceableAlloc ra,
             AllocationAnalysis analysis) {
         Stmt stmt = (Stmt) cs;
@@ -192,8 +145,7 @@ public class Phase3Transformer {
         return r;
     }
 
-    /** Rewrite a call site into a staticinvoke of the specialization that
-     *  handles every replaceable-alloc position at once. */
+    //Have to rewrite all calls as static invokes to the specialized version
     private void rewriteCallSite(Unit cs, Map<Integer, ReplaceableAlloc> posToAlloc,
             Map<ReplaceableAlloc, Map<SootField, Local>> scalarsPerAlloc) {
         Stmt stmt = (Stmt) cs;
@@ -203,8 +155,7 @@ public class Phase3Transformer {
         SortedSet<Integer> scalarized = new TreeSet<>(posToAlloc.keySet());
         if (scalarized.isEmpty()) return;
 
-        // Concrete callee: if the receiver (position 0) is scalarized on an
-        // instance call, devirtualize to that alloc's exact class.
+        //If reciever is scalarized, we have to make the method StaticInvoke and pass the reciever as an explicit argument
         SootMethod target = resolveConcreteTarget(invoke, posToAlloc, scalarized);
         if (target == null) return;
 
@@ -246,23 +197,17 @@ public class Phase3Transformer {
             try {
                 return receiverAlloc.allocClass.getMethod(
                     invoke.getMethodRef().getSubSignature());
-            } catch (Exception ignored) { /* fall through */ }
+            } catch (Exception ignored) { }
         }
         try {
             return invoke.getMethod();
         } catch (Exception e) { return null; }
     }
 
-    /** Placeholder used if a scalar-local was unexpectedly not created for a
-     *  field the specialized signature wants. Shouldn't fire if Phase 2 and
-     *  the canonical field order agree. */
+    //Just in case smth goes wrong, Shouldnt be called.
     private static Local defaultLocalForField(SootField f) {
         return Jimple.v().newLocal("sr_missing_" + f.getName(), f.getType());
     }
-
-    /* =============================================================
-     *  Utilities
-     * ============================================================= */
 
     private static Stmt toInvokeStmt(Unit u) { return (Stmt) u; }
 

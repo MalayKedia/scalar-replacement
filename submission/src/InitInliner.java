@@ -1,49 +1,18 @@
-import java.util.*;
+import java.util.*; 
 import soot.*;
 import soot.jimple.*;
 
-/**
- * Inlines the body of a constructor chain at a {@code new X(); <init>(...)}
- * allocation site. Produces a flat list of units to splice into the caller,
- * with the scalar-replaced {@code this} and super-call structure fully
- * eliminated.
- *
- * For each level of the chain (outermost first), we:
- *   - drop the {@code @this := ...} identity stmt,
- *   - rewrite {@code @parameterN := ...} into an assignment to a fresh local
- *     bound to the actual argument,
- *   - skip the nested super/delegated {@code <init>} call (the next chain
- *     level's body takes its place),
- *   - rewrite {@code this.f = v} into {@code scalar_f = v} and
- *     {@code v = this.f} into {@code v = scalar_f},
- *   - drop the trailing {@code return} (constructors always return void),
- *   - copy all other units, substituting renamed locals.
- *
- * Object.&lt;init&gt; is treated as a no-op terminator.
- *
- * Control-flow handling: every original unit in the constructor body gets
- * mapped to exactly one emitted unit (a {@link NopStmt} placeholder when
- * we'd otherwise drop the statement). After inlining, {@link #fixupUnitBoxes}
- * walks the emitted chain and rewires every branch target via this map so
- * any {@code if}/{@code goto}/{@code switch} inside the constructor points
- * at the correct emitted statement, not the dangling original.
- */
+//Used for inlining the init chain of an allocation site. Called from CodeTransformer.
+//all the @this and @parameterN identity statements have to be converted to locals during the recursive inlining
 public class InitInliner {
 
     private final Body callerBody;
     private final Map<SootField, Local> scalars;
     private final Specializer specializer;
     private final List<Unit> emitted = new ArrayList<>();
-    /** orig constructor unit → the single emitted unit that represents it. */
     private final Map<Unit, Unit> origToEmitted = new HashMap<>();
 
-    /**
-     * Counter for renaming cloned locals to avoid collision with the caller
-     * or with other allocations in the same body. Static so every
-     * {@code sr_il<n>_<origName>} synthesized in this JVM session has a
-     * unique {@code n}.
-     */
-    private static int renameCounter = 0;
+    private static int renameCounter = 0; //used to give unique names to the cloned locals
 
     public InitInliner(Body callerBody, Map<SootField, Local> scalars,
                        Specializer specializer) {
@@ -72,11 +41,11 @@ public class InitInliner {
         if (!c.isConcrete()) return;
         Body cBody = c.getActiveBody();
 
-        // Rename cloned locals; keep a mapping from orig → new.
+        //giving unique names to locals of inlined body
         Map<Local, Local> localMap = new HashMap<>();
         for (Local orig : cBody.getLocals()) {
             Local fresh = Jimple.v().newLocal(
-                "sr_il" + (renameCounter++) + "_" + orig.getName(),
+                "sr_il" + (renameCounter++) + "_" + orig.getName(), 
                 orig.getType());
             callerBody.getLocals().add(fresh);
             localMap.put(orig, fresh);
@@ -91,7 +60,6 @@ public class InitInliner {
                 IdentityStmt id = (IdentityStmt) s;
                 Value rhs = id.getRightOp();
                 if (rhs instanceof ThisRef) {
-                    // Drop, but leave a nop placeholder for possible branches.
                     emitMapped(u, Jimple.v().newNopStmt());
                     continue;
                 }
@@ -106,23 +74,19 @@ public class InitInliner {
                     }
                     continue;
                 }
-                // @caughtexception — carry through (rename lhs)
                 Local lhs = localMap.get((Local) id.getLeftOp());
                 emitMapped(u, Jimple.v().newIdentityStmt(lhs, rhs));
                 continue;
             }
 
-            // super.<init>/this.<init> call — replace with next-level inlining.
-            // Emit a nop first so any branch that targeted this call in the
-            // orig body has a valid target; the recursion then appends the
-            // super body's emitted units after it, and fall-through works.
+            //super.<init> being handled recursively
             if (s.containsInvokeExpr()
                     && s.getInvokeExpr() instanceof SpecialInvokeExpr
                     && s.getInvokeExpr().getMethodRef().getName().equals("<init>")) {
                 SpecialInvokeExpr si = (SpecialInvokeExpr) s.getInvokeExpr();
                 if (si.getBase() instanceof Local
                         && thisAliases.contains(si.getBase())) {
-                    emitMapped(u, Jimple.v().newNopStmt());
+                    emitMapped(u, Jimple.v().newNopStmt()); // we have to keep Nops just in case body has no other statements
                     List<Value> superActuals = new ArrayList<>();
                     for (Value a : si.getArgs())
                         superActuals.add(substitute(a, localMap));
@@ -132,18 +96,16 @@ public class InitInliner {
             }
 
             if (s instanceof ReturnVoidStmt || s instanceof ReturnStmt) {
-                // Constructor return — we're splicing inline, so this is a
-                // no-op; placeholder preserves any branch target.
-                emitMapped(u, Jimple.v().newNopStmt());
+                emitMapped(u, Jimple.v().newNopStmt()); //Nop to keep the body alive
                 continue;
             }
 
+            //assigns can be only of (IFR on left) or (local on left and IFR on right).
             if (s instanceof AssignStmt) {
                 AssignStmt a = (AssignStmt) s;
                 Value lhs = a.getLeftOp();
                 Value rhs = a.getRightOp();
 
-                // this.f = rhs → scalar_f = substitute(rhs)
                 if (lhs instanceof InstanceFieldRef) {
                     InstanceFieldRef ref = (InstanceFieldRef) lhs;
                     if (ref.getBase() instanceof Local
@@ -156,7 +118,7 @@ public class InitInliner {
                         }
                     }
                 }
-                // lhs = this.f → lhs = scalar_f
+
                 if (rhs instanceof InstanceFieldRef) {
                     InstanceFieldRef ref = (InstanceFieldRef) rhs;
                     if (ref.getBase() instanceof Local
@@ -169,32 +131,25 @@ public class InitInliner {
                         }
                     }
                 }
-                // Copy into a this-alias — drop to nop (aliases are meaningless now).
+
                 if (lhs instanceof Local && thisAliases.contains(lhs)) {
-                    emitMapped(u, Jimple.v().newNopStmt());
+                    emitMapped(u, Jimple.v().newNopStmt()); //Nop to keep the body alive
                     continue;
                 }
             }
 
-            // Generic fallback: clone with renamed locals.
             Unit clone = (Unit) s.clone();
             substituteInUnit(clone, localMap);
             emitMapped(u, clone);
         }
     }
 
-    /** Append {@code emit} to the output list and record the mapping
-     *  {@code orig → emit}. */
     private void emitMapped(Unit orig, Unit emit) {
         emitted.add(emit);
         origToEmitted.put(orig, emit);
     }
 
-    /**
-     * After all emission, walk emitted units and retarget every UnitBox
-     * (branch / goto / switch target) that still points at an original
-     * constructor unit to the corresponding emitted unit.
-     */
+   //Remake the graph from the flatlist of units 
     private void fixupUnitBoxes() {
         for (Unit u : emitted) {
             for (UnitBox box : u.getUnitBoxes()) {
@@ -204,10 +159,6 @@ public class InitInliner {
             }
         }
     }
-
-    /* =============================================================
-     *  Substitution and alias helpers
-     * ============================================================= */
 
     private static Set<Local> computeThisAliases(Body body, Local thisLocal) {
         Set<Local> aliases = new HashSet<>();

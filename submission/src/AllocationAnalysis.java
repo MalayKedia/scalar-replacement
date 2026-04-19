@@ -5,30 +5,12 @@ import soot.jimple.toolkits.callgraph.*;
 import soot.toolkits.graph.*;
 import soot.toolkits.scalar.*;
 
-/**
- * Phase-2 analysis: decide, per method, which {@code new} allocations are
- * scalar-replaceable under the rules:
- *
- *   - ref is never returned, thrown, stored to a static or to another
- *     object's heap slot, captured by a thread/lambda, used in identity
- *     checks (==, !=, instanceof, synchronized),
- *   - every non-&lt;init&gt; call that receives the ref has the corresponding
- *     callee param both "good" (per Phase 1) and with zero modified fields,
- *   - the object's &lt;init&gt; chain is entirely good on its {@code this} and
- *     contains no non-chain helper call that writes fields.
- *
- * Array allocations ({@code new T[n]}) are not tracked — they are never
- * scalar-replaced.
- *
- * Running this class produces a list of {@link ReplaceableAlloc} for the
- * method. The list is what Phase 3 will consume.
- */
+//Pass 2 Analysis: Takes the method summaries from pass 1 and identifies whihc allocations can be scalar replaced and necessary info.
 public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
 
     private final Body body;
     private final CallGraph cg;
     private final Map<SootMethod, MethodSummary> summaries;
-
     private final Map<Unit, ReplaceableAlloc> allocs = new LinkedHashMap<>();
     private final Set<Unit> disqualified = new HashSet<>();
 
@@ -39,7 +21,6 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
         this.cg = cg;
         this.summaries = summaries;
 
-        // Collect NewExpr allocation sites (arrays excluded).
         for (Unit u : body.getUnits()) {
             if (!(u instanceof AssignStmt)) continue;
             Value rhs = ((AssignStmt) u).getRightOp();
@@ -51,12 +32,6 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
         if (!allocs.isEmpty()) doAnalysis();
     }
 
-    /**
-     * Filter the tracked allocations to those that survived the dataflow
-     * disqualification pass and have a valid {@code <init>} chain, and
-     * finalize their fieldsUsed from chain summaries.
-     */
-    /** Expose the per-unit IN state for Phase 3 rewriting. */
     public AllocState stateBefore(Unit u) { return getFlowBefore(u); }
 
     public List<ReplaceableAlloc> getReplaceableAllocs() {
@@ -66,20 +41,18 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
             ReplaceableAlloc ra = e.getValue();
             if (disqualified.contains(site)) continue;
             if (ra.initCall == null || ra.initTarget == null) continue;
-            if (!validateAndWalkChain(ra)) continue;
+            if (!recurseChain(ra)) continue;
             populateChainFields(ra);
             r.add(ra);
         }
         return r;
     }
 
-    private boolean validateAndWalkChain(ReplaceableAlloc ra) {
+    private boolean recurseChain(ReplaceableAlloc ra) {
         SootMethod cur = ra.initTarget;
         Set<SootMethod> visited = new HashSet<>();
         while (cur != null) {
-            if (!visited.add(cur)) return false;  // unexpected cycle
-            // Stop successfully at Object.<init> — its summary is a
-            // pre-installed good-only stub; no fields to walk past.
+            if (!visited.add(cur)) return false;
             if (isObjectInit(cur)) { ra.initChain.add(cur); break; }
             MethodSummary s = summaries.get(cur);
             if (s == null) return false;
@@ -97,19 +70,12 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
     }
 
     private void populateChainFields(ReplaceableAlloc ra) {
-        // The top-of-chain summary already holds transitive read/mod
-        // contributions from super chain and from specialized helpers,
-        // because Phase 1 propagates them. So union directly.
         MethodSummary s = summaries.get(ra.initTarget);
         if (s == null) return;
         ra.fieldsUsed.addAll(s.directModified(0));
         ra.fieldsUsed.addAll(s.calleeModified(0));
         ra.fieldsUsed.addAll(s.read(0));
     }
-
-    /* =============================================================
-     *  Dataflow plumbing
-     * ============================================================= */
 
     @Override
     protected AllocState newInitialFlow() { return new AllocState(); }
@@ -125,10 +91,7 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
         AllocState.merge(a, b, out);
     }
 
-    /* =============================================================
-     *  Transfer
-     * ============================================================= */
-
+    //<-------------------Main flow logic --------------------------->
     @Override
     protected void flowThrough(AllocState in, Unit unit, AllocState out) {
         copy(in, out);
@@ -142,17 +105,18 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
 
         if (stmt.containsInvokeExpr()) {
             handleInvoke(stmt, in);
-            // fall through so x = g(...) clears allocTag on x
         }
 
         if (stmt instanceof ReturnStmt) {
             disqualifyAll(localTag(((ReturnStmt) stmt).getOp(), in));
             return;
         }
+
         if (stmt instanceof ThrowStmt) {
             disqualifyAll(localTag(((ThrowStmt) stmt).getOp(), in));
             return;
         }
+
         if (stmt instanceof IfStmt) {
             Value cond = ((IfStmt) stmt).getCondition();
             if (cond instanceof BinopExpr) {
@@ -164,10 +128,12 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
             }
             return;
         }
+
         if (stmt instanceof EnterMonitorStmt) {
             disqualifyAll(localTag(((EnterMonitorStmt) stmt).getOp(), in));
             return;
         }
+
         if (stmt instanceof ExitMonitorStmt) {
             disqualifyAll(localTag(((ExitMonitorStmt) stmt).getOp(), in));
             return;
@@ -191,42 +157,32 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
         if (lhs instanceof InstanceFieldRef) {
             InstanceFieldRef ref = (InstanceFieldRef) lhs;
             Set<Unit> baseTag = localTag(ref.getBase(), in);
-            // If the base may alias more than one tracked allocation, we
-            // cannot pick which set of scalar locals to write to — disqualify
-            // all of them.
-            disqualifyIfAmbiguous(baseTag);
+            disqualifyIfAmbiguous(baseTag); //If the local can point to multiple allocs, the allocs cant be scalar replaced.
             for (Unit u : baseTag) {
                 if (allocs.containsKey(u) && !disqualified.contains(u))
                     allocs.get(u).fieldsUsed.add(ref.getField());
             }
-            // Any param/alloc ref stored into a heap location escapes from
-            // our scalar-replacement perspective — disqualify.
-            disqualifyAll(rhsTag);
+            disqualifyAll(rhsTag); //Any value assigned to an instance field cannot be scalar replaced.
         } else if (lhs instanceof ArrayRef) {
-            disqualifyAll(rhsTag);
+            disqualifyAll(rhsTag);  //Any value assigned to an array element cannot be scalar replaced.
         } else if (lhs instanceof StaticFieldRef) {
-            disqualifyAll(rhsTag);
+            disqualifyAll(rhsTag);  //Any value assigned to a static field cannot be scalar replaced.
         }
     }
 
     private Set<Unit> resolveAllocTag(Value v, Stmt stmt, AllocState in) {
         if (v instanceof Local) {
-            return new HashSet<>(in.allocTag.getOrDefault(
-                (Local) v, Collections.emptySet()));
+            return new HashSet<>(in.allocTag.getOrDefault((Local) v, Collections.emptySet()));
         }
         if (v instanceof CastExpr) {
             Value op = ((CastExpr) v).getOp();
             if (op instanceof Local) {
-                return new HashSet<>(in.allocTag.getOrDefault(
-                    (Local) op, Collections.emptySet()));
+                return new HashSet<>(in.allocTag.getOrDefault((Local) op, Collections.emptySet()));
             }
             return new HashSet<>();
         }
         if (v instanceof NewExpr) {
-            // A new-expression always appears as the RHS of its own AssignStmt;
-            // that stmt is the allocation's identifying Unit.
-            if (stmt instanceof AssignStmt && ((AssignStmt) stmt).getRightOp() == v
-                    && allocs.containsKey(stmt)) {
+            if (stmt instanceof AssignStmt && ((AssignStmt) stmt).getRightOp() == v && allocs.containsKey(stmt)) {
                 return new HashSet<>(Set.of(stmt));
             }
             return new HashSet<>();
@@ -245,17 +201,12 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
             }
             return new HashSet<>();
         }
-        // NewArrayExpr, StaticFieldRef, ArrayRef, LengthExpr, arithmetic,
-        // constants, invoke return values — none are direct alloc aliases.
         return new HashSet<>();
     }
 
-    /* -------- Invokes -------- */
-
     private void handleInvoke(Stmt stmt, AllocState in) {
         InvokeExpr invoke = stmt.getInvokeExpr();
-        boolean isInit = invoke instanceof SpecialInvokeExpr
-                      && invoke.getMethodRef().getName().equals("<init>");
+        boolean isInit = invoke instanceof SpecialInvokeExpr && invoke.getMethodRef().getName().equals("<init>");
 
         List<Value> actuals = new ArrayList<>();
         boolean isInstance = invoke instanceof InstanceInvokeExpr;
@@ -263,17 +214,12 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
         actuals.addAll(invoke.getArgs());
 
         if (isInit && isInstance) {
-            // Receiver = the object being initialized. Pair it with the alloc.
             Set<Unit> receiverTag = localTag(actuals.get(0), in);
             disqualifyIfAmbiguous(receiverTag);
             for (Unit u : receiverTag) {
                 if (!allocs.containsKey(u)) continue;
                 ReplaceableAlloc ra = allocs.get(u);
                 if (ra.initCall != null && !ra.initCall.equals(stmt)) {
-                    // Two distinct <init> statements target the same alloc —
-                    // can't happen in legal Jimple, but be conservative.
-                    // (Re-visiting the same stmt during fixpoint iteration
-                    //  is fine and must not trip this check.)
                     disqualify(u);
                 } else if (ra.initCall == null) {
                     ra.initCall = stmt;
@@ -282,7 +228,6 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
                     } catch (Exception e) { disqualify(u); }
                 }
             }
-            // Explicit args to <init> (positions 1+): treat as regular args.
             for (int i = 1; i < actuals.size(); i++) {
                 Set<Unit> argTag = localTag(actuals.get(i), in);
                 if (!argTag.isEmpty()) checkArgAgainstCallee(argTag, i, stmt);
@@ -290,7 +235,6 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
             return;
         }
 
-        // Regular call: strict rule on every arg carrying an alloc tag.
         int curLine = stmt.getJavaSourceStartLineNumber();
         List<MethodSummary> callees = getCalleeSummaries(stmt);
 
@@ -300,32 +244,24 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
             disqualifyIfAmbiguous(argTag);
             boolean passed = checkArgAgainstCallee(argTag, i, stmt);
             if (!passed) continue;
-
-            // Accumulate call-site lines: current call's line + each
-            // callee's transitive forwarded-call lines at this position.
             Set<Integer> transitive = new HashSet<>();
             for (MethodSummary s : callees) {
-                transitive.addAll(
-                    s.paramCallSites.getOrDefault(i, Collections.emptySet()));
+                transitive.addAll(s.paramCallSites.getOrDefault(i, Collections.emptySet()));
             }
 
             for (Unit u : argTag) {
                 if (!allocs.containsKey(u) || disqualified.contains(u)) continue;
                 ReplaceableAlloc ra = allocs.get(u);
-                if (!ra.helperCallSites.contains(stmt))
-                    ra.helperCallSites.add(stmt);
+                if (!ra.CalleeCallSites.contains(stmt))
+                    ra.CalleeCallSites.add(stmt);
                 if (curLine > 0) ra.callSiteLines.add(curLine);
                 ra.callSiteLines.addAll(transitive);
             }
         }
     }
 
-    /**
-     * Validate that every CG target of {@code stmt} accepts an alloc at
-     * position {@code paramIdx}: the callee's param must be good AND have
-     * zero modified fields. On failure, disqualify every tag in argTag.
-     * Returns true iff the check passed for every tag.
-     */
+    // Check that all callees accept the arg: if any callee doesn't accept, the arg can't be replaced. 
+    // If all accept, accumulate read-field info from callees into the alloc's fieldsUsed
     private boolean checkArgAgainstCallee(Set<Unit> argTag, int paramIdx, Stmt stmt) {
         List<MethodSummary> callees = getCalleeSummaries(stmt);
         if (callees.isEmpty()) {
@@ -341,7 +277,7 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
             }
         }
         // All targets accept: accumulate read-field contributions into the
-        // alloc's fieldsUsed (these become scalar locals in Phase 3).
+        // alloc's fieldsUsed (these become scalar locals in Pass 3).
         for (MethodSummary s : callees) {
             Set<SootField> reads = s.read(paramIdx);
             if (reads.isEmpty()) continue;
@@ -359,8 +295,6 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
         while (it.hasNext()) {
             Edge e = it.next();
             SootMethod tgt = e.tgt();
-            // Skip synthetic <clinit> edges — Soot adds them on any static-
-            // member access, but they don't take the call-site's args.
             if (tgt.getName().equals("<clinit>")) continue;
             MethodSummary s = summaries.get(tgt);
             if (s == null) {
@@ -375,8 +309,6 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
     private int paramCountOf(SootMethod m) {
         return m.getParameterCount() + (m.isStatic() ? 0 : 1);
     }
-
-    /* -------- Helpers -------- */
 
     private Set<Unit> localTag(Value v, AllocState in) {
         if (v instanceof Local) {
@@ -397,12 +329,6 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
         for (Unit u : sites) disqualify(u);
     }
 
-    /**
-     * A local whose alloc-tag set has more than one member cannot be scalar-
-     * replaced through, because any use of the local (field access, invoke
-     * arg) would need to pick which allocation's scalar locals to read/write.
-     * Disqualify every candidate in such a set.
-     */
     private void disqualifyIfAmbiguous(Set<Unit> tag) {
         if (tag.size() > 1) disqualifyAll(tag);
     }

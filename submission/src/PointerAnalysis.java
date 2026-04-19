@@ -5,20 +5,7 @@ import soot.jimple.toolkits.callgraph.*;
 import soot.toolkits.graph.*;
 import soot.toolkits.scalar.*;
 
-/**
- * Phase-1 analysis: compute a {@link MethodSummary} for one method.
- *
- * Forward dataflow on per-local param-alias tag sets (see {@link AnalysisState}).
- * While the fixpoint iterates, side-effect accumulators on {@link #result}
- * record escape, identity use, forwarded-bad, and read/modified field facts.
- * All accumulators are monotone (union), so re-observing the same fact across
- * iterations is idempotent.
- *
- * Assumes summaries for every outgoing call target are already installed in
- * {@code summaries}. The driver arranges this by visiting SCCs in reverse
- * topological order and pre-installing a fully-bad summary for every method
- * in a recursive SCC.
- */
+//Pass 1 Intraprocedural analysis. Its a may alias analysis.
 public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
 
     private final Body body;
@@ -26,7 +13,6 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
     private final CallGraph cg;
     private final Map<SootMethod, MethodSummary> summaries;
     private final MethodSummary result;
-
     private final int paramCount;
     private final Map<Integer, Local> paramLocals = new HashMap<>();
 
@@ -37,26 +23,23 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
         this.method = body.getMethod();
         this.cg = cg;
         this.summaries = summaries;
-
         int idx = 0;
+
         if (!method.isStatic()) {
             paramLocals.put(idx++, body.getThisLocal());
         }
+
         for (int i = 0; i < method.getParameterCount(); i++) {
             paramLocals.put(idx++, body.getParameterLocal(i));
         }
+
         this.paramCount = idx;
         this.result = new MethodSummary(paramCount);
-
         doAnalysis();
-        result.finalizeGoodParams();
+        result.setGoodParams();
     }
 
     public MethodSummary getSummary() { return result; }
-
-    /* =============================================================
-     *  Flow plumbing
-     * ============================================================= */
 
     @Override
     protected AnalysisState newInitialFlow() { return new AnalysisState(); }
@@ -78,10 +61,7 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
         AnalysisState.merge(a, b, out);
     }
 
-    /* =============================================================
-     *  Transfer
-     * ============================================================= */
-
+    //Core logic on how to update the state based on the statement type.
     @Override
     protected void flowThrough(AnalysisState in, Unit unit, AnalysisState out) {
         copy(in, out);
@@ -94,7 +74,6 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
 
         if (stmt.containsInvokeExpr()) {
             handleInvoke(stmt, in);
-            // fall through so x = g(...) also records return-value alias
         }
 
         if (stmt instanceof ReturnStmt) {
@@ -118,12 +97,14 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
             return;
         }
 
-        if (!(stmt instanceof AssignStmt)) return;
-        handleAssign((AssignStmt) stmt, in, out);
+        if (stmt instanceof AssignStmt) {
+            handleAssign((AssignStmt) stmt, in, out);
+        }
+
+        return;
     }
 
-    /* -------- IdentityStmt (@this, @parameter, @caughtexception) -------- */
-
+    //<---------------Helpers to handle different statement types-------------->
     private void handleIdentity(IdentityStmt stmt, AnalysisState out) {
         if (!(stmt.getLeftOp() instanceof Local)) return;
         Local lhs = (Local) stmt.getLeftOp();
@@ -138,8 +119,6 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
             out.directAlias.put(lhs, new HashSet<>());
         }
     }
-
-    /* -------- AssignStmt -------- */
 
     private void handleAssign(AssignStmt stmt, AnalysisState in, AnalysisState out) {
         Value lhs = stmt.getLeftOp();
@@ -160,33 +139,22 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
                     .computeIfAbsent(i, k -> new HashSet<>())
                     .add(ref.getField());
             }
-            // Any param-aliased value being stored into a heap location
-            // escapes conservatively — Phase 1 doesn't know whether the
-            // base outlives this method.
             for (int j : rhsTag) result.escapingParams.add(j);
         } else if (lhs instanceof ArrayRef) {
-            // Array element store: we don't track array slots, so any
-            // param-aliased rhs escapes.
             for (int j : rhsTag) result.escapingParams.add(j);
         } else if (lhs instanceof StaticFieldRef) {
             for (int j : rhsTag) result.escapingParams.add(j);
         }
     }
 
-    /* -------- RHS resolution -------- */
-
-    /** Tag set for an expression used as a value. Has side effects: field
-     *  loads record readFields; instanceof records identity use. */
     private Set<Integer> resolveDirect(Value v, AnalysisState in, Stmt containingStmt) {
         if (v instanceof Local) {
-            return new HashSet<>(in.directAlias.getOrDefault(
-                (Local) v, Collections.emptySet()));
+            return new HashSet<>(in.directAlias.getOrDefault((Local) v, Collections.emptySet()));
         }
         if (v instanceof CastExpr) {
             Value op = ((CastExpr) v).getOp();
             if (op instanceof Local) {
-                return new HashSet<>(in.directAlias.getOrDefault(
-                    (Local) op, Collections.emptySet()));
+                return new HashSet<>(in.directAlias.getOrDefault((Local) op, Collections.emptySet()));
             }
             return new HashSet<>();
         }
@@ -207,8 +175,6 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
         if (v instanceof InvokeExpr) {
             return computeReturnAlias((InvokeExpr) v, in, containingStmt);
         }
-        // NewExpr, NewArrayExpr, StaticFieldRef, ArrayRef, LengthExpr,
-        // arithmetic, constants — none are direct param aliases.
         return new HashSet<>();
     }
 
@@ -218,8 +184,6 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
         }
         return Collections.emptySet();
     }
-
-    /* -------- Return / Throw / If / Monitor -------- */
 
     private void handleReturn(ReturnStmt stmt, AnalysisState in) {
         Set<Integer> tag = localTag(stmt.getOp(), in);
@@ -249,13 +213,10 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
 
     private void markIdentity(Value v, AnalysisState in) {
         if (!(v instanceof Local)) return;
-        for (int i : in.directAlias.getOrDefault(
-                (Local) v, Collections.emptySet())) {
+        for (int i : in.directAlias.getOrDefault((Local) v, Collections.emptySet())) {
             result.identityUsedParams.add(i);
         }
     }
-
-    /* -------- Invokes -------- */
 
     private void handleInvoke(Stmt stmt, AnalysisState in) {
         InvokeExpr invoke = stmt.getInvokeExpr();
@@ -272,8 +233,7 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
         for (int i = 0; i < actuals.size(); i++) {
             Value a = actuals.get(i);
             if (!(a instanceof Local)) continue;
-            Set<Integer> tags = in.directAlias.getOrDefault(
-                (Local) a, Collections.emptySet());
+            Set<Integer> tags = in.directAlias.getOrDefault((Local) a, Collections.emptySet());
             if (tags.isEmpty()) continue;
 
             boolean goodInAllTargets = true;
@@ -295,14 +255,10 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
                     if (s.identityUsedParams.contains(i)) identityInAny = true;
                     modAt.addAll(s.allModified(i));
                     readAt.addAll(s.read(i));
-                    transitiveCallSites.addAll(
-                        s.paramCallSites.getOrDefault(i, Collections.emptySet()));
+                    transitiveCallSites.addAll(s.paramCallSites.getOrDefault(i, Collections.emptySet()));
                 }
             }
 
-            // Chain init calls contribute to calleeModifiedFields on position 0
-            // (this's receiver) but NOT to nonChainCalleeModifiedFields. Other
-            // positions are treated as regular forwarded args even on chain-init.
             boolean isChainContribution = isChainInit && i == 0;
 
             for (int p : tags) {
@@ -323,9 +279,6 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
                     result.readFields
                         .computeIfAbsent(p, k -> new HashSet<>())
                         .addAll(readAt);
-
-                // Track call-site lines for this param: current call's line
-                // plus callees' own transitive forwarded-call lines.
                 if (curLine > 0)
                     result.paramCallSites
                         .computeIfAbsent(p, k -> new HashSet<>())
@@ -344,11 +297,7 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
         }
     }
 
-    /**
-     * True if {@code stmt} is a super.&lt;init&gt; / this.&lt;init&gt; call
-     * within a constructor body — i.e., a specialinvoke with name &lt;init&gt;
-     * whose receiver is the enclosing method's {@code this} local.
-     */
+    //Checks if invoke is a call to a constructor
     private boolean isChainInitCall(Stmt stmt) {
         if (method.isStatic()) return false;
         if (!method.getName().equals("<init>")) return false;
@@ -387,9 +336,7 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
         Iterator<Edge> it = cg.edgesOutOf(stmt);
         while (it.hasNext()) {
             SootMethod tgt = it.next().tgt();
-            // Skip synthetic <clinit> edges — they model class-initialization
-            // side effects, not argument-passing calls.
-            if (tgt.getName().equals("<clinit>")) continue;
+            if (tgt.getName().equals("<clinit>")) continue; //skip Clinits
             MethodSummary s = summaries.get(tgt);
             if (s == null) {
                 r.add(MethodSummary.allBad(paramCountOf(tgt)));

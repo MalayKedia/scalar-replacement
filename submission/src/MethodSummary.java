@@ -2,71 +2,19 @@ import java.util.*;
 import soot.SootField;
 import soot.SootMethod;
 
-/**
- * Phase-1 summary of a method, indexed by parameter.
- *
- * Param indices are uniform: for instance methods 0 = this and 1..k = explicit
- * params; for static methods 0..k-1 = explicit params (no receiver).
- *
- * "Good" is the scalar-replacement contract for a single param position:
- * the reference passed at that position does not escape, is never used for
- * identity, and is only forwarded to callees whose corresponding param is
- * also good. A caller that passes a scalar-replaceable object at a good
- * position can safely rewrite the call via specialization.
- */
 public class MethodSummary {
 
     final int paramCount;
-
-    /** Params that satisfy the contract. Derived from the bad sets. */
-    final Set<Integer> goodParams          = new HashSet<>();
-
-    /** Param ref flowed to return, static store, foreign field store, throw, thread capture, etc. */
-    final Set<Integer> escapingParams      = new HashSet<>();
-
-    /** Param ref used in ==/!=/instanceof/synchronized/... */
-    final Set<Integer> identityUsedParams  = new HashSet<>();
-
-    /** Param forwarded to a callee position that isn't good. */
-    final Set<Integer> forwardedBadParams  = new HashSet<>();
-
-    /** Params whose reference may be returned by this method. */
-    final Set<Integer> returnAliases       = new HashSet<>();
-
-    /** Fields of param i written by direct stores in this method. */
+    final Set<Integer> goodParams = new HashSet<>();
+    final Set<Integer> escapingParams = new HashSet<>();
+    final Set<Integer> identityUsedParams = new HashSet<>();
+    final Set<Integer> forwardedBadParams = new HashSet<>();
+    final Set<Integer> returnAliases = new HashSet<>();
     final Map<Integer, Set<SootField>> directlyModifiedFields = new HashMap<>();
-
-    /** Fields of param i written via a forwarded call to a good callee. */
-    final Map<Integer, Set<SootField>> calleeModifiedFields   = new HashMap<>();
-
-    /** Fields of param i read (directly or transitively via good callees). */
-    final Map<Integer, Set<SootField>> readFields             = new HashMap<>();
-
-    /**
-     * Like {@link #calleeModifiedFields} but excluding contributions from
-     * super.&lt;init&gt; / this.&lt;init&gt; delegated-constructor calls (only
-     * meaningful for constructors; identical to calleeModifiedFields for
-     * non-constructors). Phase 2 uses this to check that a constructor's
-     * body has no non-chain helper call that writes fields — such a helper
-     * would require writing modified scalars back at the call site, which
-     * our specialization doesn't support.
-     */
+    final Map<Integer, Set<SootField>> calleeModifiedFields = new HashMap<>();
+    final Map<Integer, Set<SootField>> readFields = new HashMap<>();
     final Map<Integer, Set<SootField>> nonChainCalleeModifiedFields = new HashMap<>();
-
-    /**
-     * For constructors: the target of the super.&lt;init&gt; / this.&lt;init&gt;
-     * call in this constructor's body, or null if none. Phase 2 walks this
-     * pointer to validate the whole constructor chain.
-     */
-    SootMethod chainInitTarget = null;
-
-    /**
-     * For each param i: source-line numbers of every call in this method's
-     * body that receives param i (or a callee's own forwarded param i
-     * transitively). Phase 2 unions these into a replaceable allocation's
-     * call-site report so {@code Y[...]} lists every line touched by the
-     * specialization, not just the immediate call sites.
-     */
+    SootMethod chainInitTarget = null;//Pointer to init method
     final Map<Integer, Set<Integer>> paramCallSites = new HashMap<>();
 
     public MethodSummary(int paramCount) {
@@ -81,7 +29,6 @@ public class MethodSummary {
         return calleeModifiedFields.getOrDefault(i, Collections.emptySet());
     }
 
-    /** Union of direct and callee-mediated modifications to param i's fields. */
     Set<SootField> allModified(int i) {
         Set<SootField> r = new HashSet<>(directModified(i));
         r.addAll(calleeModified(i));
@@ -96,11 +43,7 @@ public class MethodSummary {
         return nonChainCalleeModifiedFields.getOrDefault(i, Collections.emptySet());
     }
 
-    /**
-     * Conservative summary used for unanalyzable callees: library methods,
-     * phantoms, and every member of a recursive SCC under the pessimistic
-     * fixpoint.
-     */
+    //Helper used to create a summary where all params are bad
     static MethodSummary allBad(int paramCount) {
         MethodSummary s = new MethodSummary(paramCount);
         for (int i = 0; i < paramCount; i++) {
@@ -111,8 +54,8 @@ public class MethodSummary {
         return s;
     }
 
-    /** After all bad sets are populated, derive goodParams as the complement. */
-    void finalizeGoodParams() {
+    // Set all non-bad params to good
+    void setGoodParams() {
         goodParams.clear();
         for (int i = 0; i < paramCount; i++) {
             if (!escapingParams.contains(i)

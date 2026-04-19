@@ -2,19 +2,7 @@ import java.util.*;
 import soot.*;
 import soot.jimple.*;
 
-/**
- * Synthesizes specialized static variants of methods whose selected reference
- * parameters are replaced by one scalar parameter per field the callee reads.
- *
- * Keyed on {@code (method, scalarized-param-positions)}. Two call sites that
- * scalarize the same position(s) of the same method share one specialization —
- * the set of fields passed is determined by the callee's body
- * ({@code readFields}), not by the caller's alloc.
- *
- * Because Phase 2 guarantees every scalarized position has zero modified
- * fields transitively, the specialized method never needs to write back:
- * signature only widens inputs, return type is unchanged.
- */
+//Generates the methods which now have the changed signatures with scalarized fields instead of object params, and rewrites the method body accordingly.
 public class Specializer {
 
     private final Map<SootMethod, MethodSummary> summaries;
@@ -25,23 +13,14 @@ public class Specializer {
         this.summaries = summaries;
     }
 
-    /** Public ordering lookup — callers need this to build the call-site arg list
-     *  in exactly the order the synthesized signature expects. */
     public List<SootField> fieldOrderFor(SootMethod m, int scalarizedPos) {
-        // For the call-site builder, we only need the ordering *per position*.
-        // The per-key ordering concatenates the per-position orderings.
+
         Key k = new Key(m, Collections.singleton(scalarizedPos));
-        // If we already synthesized a specialization for exactly this single
-        // position, reuse its ordering; otherwise compute from the summary.
-        List<SootField> cached = fieldOrder.get(k);
+        List<SootField> cached = fieldOrder.get(k); //If we already generated a specialization, then use that
         if (cached != null) return cached;
-        return canonicalFieldOrder(m, scalarizedPos);
+        return generateFieldOrder(m, scalarizedPos); //Else compute a new one
     }
 
-    /**
-     * Get or create the specialized method for {@code (m, positions)}.
-     * Returns null if synthesis fails (phantom, missing summary, etc.).
-     */
     public SootMethod specialize(SootMethod m, SortedSet<Integer> positions) {
         Key key = new Key(m, positions);
         SootMethod existing = cache.get(key);
@@ -51,16 +30,10 @@ public class Specializer {
         MethodSummary s = summaries.get(m);
         if (s == null) return null;
 
-        // Compute field order per scalarized position, concatenated.
         List<List<SootField>> perPos = new ArrayList<>();
-        for (int p : positions) perPos.add(canonicalFieldOrder(m, p));
+        for (int p : positions) perPos.add(generateFieldOrder(m, p));
 
-        // Build new signature.
         List<Type> newParamTypes = new ArrayList<>();
-        // Walk the original params in order; replace scalarized positions
-        // with their scalar field types, leave others as-is.
-        // Note: callee param indexing matches our uniform scheme (0 = this
-        // for instance, 0... for static).
         int paramCount = m.getParameterCount() + (m.isStatic() ? 0 : 1);
         int scalarPosIdx = 0;
         Iterator<Integer> posIt = positions.iterator();
@@ -84,24 +57,18 @@ public class Specializer {
         String name = m.getName() + "$scalar_" + joinPositions(positions);
         SootClass declaring = m.getDeclaringClass();
 
-        // If we've already created a method with this exact name (e.g., from
-        // a previous analysis run on the same Scene), reuse.
         try {
-            SootMethod existingOnClass =
-                declaring.getMethod(name, newParamTypes, m.getReturnType());
+            SootMethod existingOnClass = declaring.getMethod(name, newParamTypes, m.getReturnType());
             cache.put(key, existingOnClass);
-            // Record concatenated field order.
             List<SootField> concat = new ArrayList<>();
             for (List<SootField> p : perPos) concat.addAll(p);
             fieldOrder.put(key, concat);
             for (int p : positions)
-                fieldOrder.put(new Key(m, Collections.singleton(p)),
-                               canonicalFieldOrder(m, p));
+                fieldOrder.put(new Key(m, Collections.singleton(p)),generateFieldOrder(m, p));
             return existingOnClass;
-        } catch (Exception ignored) { /* need to create */ }
+        } catch (Exception ignored) { }
 
-        SootMethod spec = new SootMethod(name, newParamTypes, m.getReturnType(),
-            Modifier.STATIC | Modifier.PUBLIC);
+        SootMethod spec = new SootMethod(name, newParamTypes, m.getReturnType(),Modifier.STATIC | Modifier.PUBLIC);
         declaring.addMethod(spec);
 
         JimpleBody newBody = Jimple.v().newBody(spec);
@@ -115,21 +82,17 @@ public class Specializer {
         for (List<SootField> p : perPos) concat.addAll(p);
         fieldOrder.put(key, concat);
         for (int p : positions)
-            fieldOrder.put(new Key(m, Collections.singleton(p)),
-                           canonicalFieldOrder(m, p));
+            fieldOrder.put(new Key(m, Collections.singleton(p)),generateFieldOrder(m, p));
         return spec;
     }
 
-    /* =============================================================
-     *  Body rewriting inside the specialized method
-     * ============================================================= */
-
+    //rewriting the body to replace field accesses with scalar params, and nested invokes with their specialized versions if needed.
     private void rewriteSpecializedBody(JimpleBody newBody, SootMethod orig,
             SortedSet<Integer> positions, List<List<SootField>> perPos) {
-        // Map from scalarized position → map of field → fresh param local.
+
         Map<Integer, Map<SootField, Local>> scalarParamsByPos = new HashMap<>();
 
-        // Locate the existing @this / @parameterN identity stmts.
+        //find all parameter statements
         Local thisLocal = null;
         Map<Integer, Local> paramLocals = new HashMap<>();
         List<IdentityStmt> idStmts = new ArrayList<>();
@@ -137,38 +100,31 @@ public class Specializer {
             if (u instanceof IdentityStmt) {
                 IdentityStmt id = (IdentityStmt) u;
                 if (id.getRightOp() instanceof ThisRef) {
-                    thisLocal = (Local) id.getLeftOp();
+                    thisLocal = (Local) id.getLeftOp(); //@this local
                     idStmts.add(id);
                 } else if (id.getRightOp() instanceof ParameterRef) {
-                    paramLocals.put(((ParameterRef) id.getRightOp()).getIndex(),
-                                    (Local) id.getLeftOp());
+                    paramLocals.put(((ParameterRef) id.getRightOp()).getIndex(),(Local) id.getLeftOp()); //parameter locals
                     idStmts.add(id);
                 }
             }
         }
 
-        // Rewrite identity stmts into the new signature: build a fresh
-        // identity block with the new parameter order.
+        //use the parameter statements to generate new identity statements for scalar params
         List<Unit> newIds = new ArrayList<>();
         int paramCount = orig.getParameterCount() + (orig.isStatic() ? 0 : 1);
         int newParamIdx = 0;
         for (int oldIdx = 0; oldIdx < paramCount; oldIdx++) {
             if (positions.contains(oldIdx)) {
-                // Introduce one fresh local per field, identity-bound to
-                // @parameterN at the widened indices.
                 List<SootField> fields = perPos.get(indexOf(positions, oldIdx));
                 Map<SootField, Local> fieldLocals = new LinkedHashMap<>();
                 for (SootField f : fields) {
-                    Local l = Jimple.v().newLocal("srP" + oldIdx + "_" + f.getName(),
-                                                   f.getType());
+                    Local l = Jimple.v().newLocal("srP" + oldIdx + "_" + f.getName(),f.getType());
                     newBody.getLocals().add(l);
-                    newIds.add(Jimple.v().newIdentityStmt(l,
-                        Jimple.v().newParameterRef(f.getType(), newParamIdx++)));
+                    newIds.add(Jimple.v().newIdentityStmt(l,Jimple.v().newParameterRef(f.getType(), newParamIdx++)));
                     fieldLocals.put(f, l);
                 }
                 scalarParamsByPos.put(oldIdx, fieldLocals);
             } else {
-                // Re-index existing @parameter / @this to new position.
                 Local existing;
                 Type tp;
                 if (oldIdx == 0 && !orig.isStatic()) {
@@ -180,8 +136,7 @@ public class Specializer {
                     tp = orig.getParameterType(origParamIdx);
                 }
                 if (existing == null) { newParamIdx++; continue; }
-                newIds.add(Jimple.v().newIdentityStmt(existing,
-                    Jimple.v().newParameterRef(tp, newParamIdx++)));
+                newIds.add(Jimple.v().newIdentityStmt(existing,Jimple.v().newParameterRef(tp, newParamIdx++)));
             }
         }
 
@@ -193,7 +148,7 @@ public class Specializer {
             else newBody.getUnits().insertBefore(id, firstOrig);
         }
 
-        // Compute alias set for each scalarized position's original "holder" local.
+        // Compute alias set for each scalarized position by propagating from the original param local
         Map<Integer, Set<Local>> aliasesByPos = new HashMap<>();
         for (int p : positions) {
             Local holder;
@@ -205,13 +160,9 @@ public class Specializer {
             if (holder != null) aliasesByPos.put(p, computeAliases(newBody, holder));
         }
 
-        // Rewrite: field accesses → scalar params; nested invokes that
-        // touch scalarized holders → specialized static invokes.
         List<Unit> toRemoveCopies = new ArrayList<>();
         for (Unit u : new ArrayList<>(newBody.getUnits())) {
             Stmt stmt = (Stmt) u;
-
-            // Rewrite nested invokes first (they may appear as RHS of assign).
             if (stmt.containsInvokeExpr()) {
                 rewriteNestedInvoke(stmt, aliasesByPos, scalarParamsByPos);
             }
@@ -221,7 +172,6 @@ public class Specializer {
             Value lhs = a.getLeftOp();
             Value rhs = a.getRightOp();
 
-            // v = this.f  →  v = scalar_f
             if (rhs instanceof InstanceFieldRef) {
                 InstanceFieldRef ref = (InstanceFieldRef) rhs;
                 Integer pos = posOwning(ref.getBase(), aliasesByPos);
@@ -231,8 +181,6 @@ public class Specializer {
                 }
             }
 
-            // Drop plain copies whose lhs aliases a scalarized holder.
-            // They carry a reference that no longer exists.
             if (lhs instanceof Local) {
                 for (Set<Local> aliases : aliasesByPos.values()) {
                     if (aliases.contains(lhs)) { toRemoveCopies.add(u); break; }
@@ -242,12 +190,7 @@ public class Specializer {
         for (Unit u : toRemoveCopies) newBody.getUnits().remove(u);
     }
 
-    /**
-     * Rewrite an invoke inside a specialized body: if any of its receiver/args
-     * aliases a scalarized holder in this method, the callee itself needs a
-     * specialization for those positions, and the invoke becomes a
-     * {@code staticinvoke} of it with our scalar params threaded through.
-     */
+    //Rewriting nested invokes to call the specialized versions if they call the same method with aliases of our scalarized params.
     private void rewriteNestedInvoke(Stmt stmt,
             Map<Integer, Set<Local>> aliasesByPos,
             Map<Integer, Map<SootField, Local>> scalarParamsByPos) {
@@ -258,8 +201,6 @@ public class Specializer {
         if (isInstance) actuals.add(((InstanceInvokeExpr) invoke).getBase());
         actuals.addAll(invoke.getArgs());
 
-        // inner position → outer position (the position in *our* signature
-        // that the inner's actual aliases).
         Map<Integer, Integer> innerToOuter = new TreeMap<>();
         for (int i = 0; i < actuals.size(); i++) {
             Value a = actuals.get(i);
@@ -268,14 +209,11 @@ public class Specializer {
             if (outer != null) innerToOuter.put(i, outer);
         }
         if (innerToOuter.isEmpty()) return;
-
-        // Resolve the concrete callee. For scalarized receivers we
-        // devirtualize to the declared target (Phase 1 ensured all CHA
-        // targets are equally good for our purposes).
+        //get callee method
         SootMethod target;
         try { target = invoke.getMethod(); }
         catch (Exception e) { return; }
-
+        //specialize callee on the positions corresponding to the aliases we found
         SortedSet<Integer> innerPositions = new TreeSet<>(innerToOuter.keySet());
         SootMethod innerSpec = specialize(target, innerPositions);
         if (innerSpec == null) return;
@@ -287,12 +225,10 @@ public class Specializer {
             if (innerToOuter.containsKey(i)) {
                 int outerPos = innerToOuter.get(i);
                 Map<SootField, Local> myScalars = scalarParamsByPos.get(outerPos);
-                for (SootField f : canonicalFieldOrder(target, i)) {
+                for (SootField f : generateFieldOrder(target, i)) {
                     Local sl = myScalars != null ? myScalars.get(f) : null;
                     if (sl == null) {
-                        // Fallback: synthesize a temp local (shouldn't happen
-                        // if readFields propagation is consistent).
-                        sl = Jimple.v().newLocal("sr_missing_" + f.getName(), f.getType());
+                        sl = Jimple.v().newLocal("sr_missing_" + f.getName(), f.getType()); //error , shouldn't happen
                     }
                     newArgs.add(sl);
                 }
@@ -338,22 +274,12 @@ public class Specializer {
         return aliases;
     }
 
-    /* =============================================================
-     *  Canonical field ordering
-     * ============================================================= */
-
-    /**
-     * Canonical ordering of the fields the callee reads at position {@code pos}:
-     * iterate the declaring class's field list in declaration order and keep
-     * those present in the summary's readFields.
-     */
-    private List<SootField> canonicalFieldOrder(SootMethod m, int pos) {
+    //Generate a stable field order for a given method + scalarized position
+    private List<SootField> generateFieldOrder(SootMethod m, int pos) {
         MethodSummary s = summaries.get(m);
         Set<SootField> wanted = (s == null)
             ? Collections.emptySet() : s.read(pos);
         if (wanted.isEmpty()) return Collections.emptyList();
-        // Walk the receiver's declared class (for pos 0 of instance methods,
-        // that's the declaring class of m; for other positions, the param type).
         SootClass typeClass;
         if (pos == 0 && !m.isStatic()) {
             typeClass = m.getDeclaringClass();
@@ -364,7 +290,6 @@ public class Specializer {
             typeClass = ((RefType) pt).getSootClass();
         }
         List<SootField> ordered = new ArrayList<>();
-        // Walk class chain from declaring class up to Object for stable order.
         SootClass cur = typeClass;
         while (cur != null) {
             for (SootField f : cur.getFields()) {
@@ -372,14 +297,9 @@ public class Specializer {
             }
             cur = cur.hasSuperclass() ? cur.getSuperclass() : null;
         }
-        // Any wanted field not found on the type (shouldn't happen) — append.
         for (SootField f : wanted) if (!ordered.contains(f)) ordered.add(f);
         return ordered;
     }
-
-    /* =============================================================
-     *  Helpers
-     * ============================================================= */
 
     private static int indexOf(SortedSet<Integer> positions, int p) {
         int i = 0;

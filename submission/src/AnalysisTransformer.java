@@ -6,53 +6,33 @@ import java.util.*;
 import soot.*;
 import soot.jimple.toolkits.callgraph.*;
 
-/**
- * Whole-program driver for Phase-1 summary computation.
- *
- * Order of operations:
- *   1. Collect concrete user methods reachable from the entry point.
- *   2. Compute SCCs on the induced call graph (Tarjan, reverse topological).
- *   3. Visit SCCs in reverse topological order:
- *        - recursive SCC (size > 1, or singleton with self-edge):
- *              install {@link MethodSummary#allBad} for every member. This
- *              is the pessimistic fixpoint — sound, strictly less precise
- *              than the coinductive version.
- *        - singleton non-recursive method:
- *              run {@link PointerAnalysis}, store the resulting summary.
- *
- * All callee summaries are guaranteed to exist before a caller is analysed,
- * so {@link PointerAnalysis} never encounters a missing entry for a reachable
- * target.
- */
+
 public class AnalysisTransformer extends SceneTransformer {
 
     private final Map<SootMethod, MethodSummary> summaries = new HashMap<>();
-
-    /** Placeholder for Phase 3. Phase 1 does not mutate IR; this flag is unused
-     *  until transformation lands, but SootRunner still toggles it. */
     boolean enableTransformation = true;
-
-    /** If non-null, dump untransformed Jimple for every application class
-     *  to this directory (one .jimple file per class) BEFORE Phase 3 runs. */
     String baseJimpleDir = null;
-
-    /** If non-null, dump post-transformation Jimple for every application
-     *  class to this directory AFTER Phase 3 runs. */
     String optJimpleDir = null;
 
     @Override
     protected void internalTransform(String phaseName, Map<String, String> options) {
         CallGraph cg = Scene.v().getCallGraph();
 
-        // Object.<init> is library code but semantically a no-op — it neither
-        // escapes nor modifies this. Without this override, every user
-        // constructor's super call would resolve to allBad and poison the
-        // whole chain, making goodParams[0] forever false on constructors.
-        installObjectInitSummary();
+        //First taking care of java.lang.Object.<init> which is a special case.
+        try {
+            SootClass objectClass = Scene.v().getSootClass("java.lang.Object");
+            SootMethod objectInit = objectClass.getMethod(
+                "<init>", Collections.emptyList(), VoidType.v());
+            MethodSummary s = new MethodSummary(1);
+            s.goodParams.add(0);
+            summaries.put(objectInit, s);
+        } catch (Exception ignored) { }   
 
+        //Getting Scc's
         Set<SootMethod> reachable = collectReachable(cg);
         List<List<SootMethod>> sccs = tarjan(reachable, cg);
 
+        //Pass 1: doing intraprocedural pointer analysis
         for (List<SootMethod> scc : sccs) {
             boolean recursive = scc.size() > 1 || hasSelfEdge(scc.get(0), cg);
             if (recursive) {
@@ -70,7 +50,7 @@ public class AnalysisTransformer extends SceneTransformer {
             }
         }
 
-        // Phase 2: per-method scalar-replaceable allocation analysis.
+        // Pass 2: per-method scalar-replaceable allocation analysis.
         Map<SootMethod, List<ReplaceableAlloc>> perMethodAllocs = new LinkedHashMap<>();
         Map<SootMethod, AllocationAnalysis> perMethodAnalysis = new LinkedHashMap<>();
         for (List<SootMethod> scc : sccs) {
@@ -88,41 +68,30 @@ public class AnalysisTransformer extends SceneTransformer {
             }
         }
 
-        printYResults(perMethodAllocs);
+        printResults(perMethodAllocs);
+        if (baseJimpleDir != null) dumpJimpleCode(baseJimpleDir);
 
-        // Dump untransformed Jimple before Phase 3 runs (bodies haven't
-        // been mutated yet).
-        if (baseJimpleDir != null) dumpJimpleTo(baseJimpleDir);
-
-        // Phase 3: IR transformation.
+        // Pass 3: code transformation
         if (enableTransformation) {
             Specializer specializer = new Specializer(summaries);
-            Phase3Transformer p3 = new Phase3Transformer(specializer);
+            CodeTransformer p3 = new CodeTransformer(specializer);
             for (Map.Entry<SootMethod, List<ReplaceableAlloc>> e
                     : perMethodAllocs.entrySet()) {
                 try {
                     p3.transform(e.getKey(), e.getValue(),
                                  perMethodAnalysis.get(e.getKey()));
                 } catch (Exception ex) {
-                    System.err.println("Phase 3 failed for " + e.getKey()
+                    System.err.println("Code Transformation failed for " + e.getKey()
                         + ": " + ex);
                 }
             }
         }
 
-        // Dump transformed Jimple after Phase 3. Soot's normal class-file
-        // writer will run next and produce .class files in parallel — we
-        // don't have to re-run Soot for the Jimple format.
-        if (optJimpleDir != null) dumpJimpleTo(optJimpleDir);
+        if (optJimpleDir != null) dumpJimpleCode(optJimpleDir);
     }
 
-    /**
-     * Write one {@code <ClassName>.jimple} file per application class into
-     * {@code dir}. Uses {@link Printer} directly so we get Jimple text for
-     * the IR state <em>right now</em>, independent of Soot's {@code -f}
-     * option (which governs only the final output writer).
-     */
-    private void dumpJimpleTo(String dir) {
+
+    private void dumpJimpleCode(String dir) {
         File outDir = new File(dir);
         if (!outDir.exists()) outDir.mkdirs();
         for (SootClass cls : Scene.v().getApplicationClasses()) {
@@ -136,21 +105,8 @@ public class AnalysisTransformer extends SceneTransformer {
         }
     }
 
-    private void installObjectInitSummary() {
-        try {
-            SootClass objectClass = Scene.v().getSootClass("java.lang.Object");
-            SootMethod objectInit = objectClass.getMethod(
-                "<init>", Collections.emptyList(), VoidType.v());
-            MethodSummary s = new MethodSummary(1);
-            s.goodParams.add(0);
-            summaries.put(objectInit, s);
-        } catch (Exception ignored) { }
-    }
 
-    /* =============================================================
-     *  Reachability
-     * ============================================================= */
-
+    //<-----------Helper to find SCCs using Tarjans algorithm------------>
     private Set<SootMethod> collectReachable(CallGraph cg) {
         Set<SootMethod> visited = new HashSet<>();
         Deque<SootMethod> work = new ArrayDeque<>(Scene.v().getEntryPoints());
@@ -180,13 +136,6 @@ public class AnalysisTransformer extends SceneTransformer {
     private int paramCountOf(SootMethod m) {
         return m.getParameterCount() + (m.isStatic() ? 0 : 1);
     }
-
-    /* =============================================================
-     *  Tarjan's SCC algorithm
-     *
-     *  The SCCs appear in reverse topological order in the returned list
-     *  (a property of Tarjan), which is exactly what Phase 1 needs.
-     * ============================================================= */
 
     private List<List<SootMethod>> tarjan(Set<SootMethod> nodes, CallGraph cg) {
         TarjanState st = new TarjanState();
@@ -236,13 +185,9 @@ public class AnalysisTransformer extends SceneTransformer {
         final List<List<SootMethod>> result    = new ArrayList<>();
         int counter = 0;
     }
+    //<--------------------------------------------------------------->
 
-    /**
-     * Print one {@code O<line> = Y[callsite_lines]} line per
-     * scalar-replaceable allocation across the whole program, sorted by
-     * allocation line. Disqualified allocations are suppressed.
-     */
-    private void printYResults(Map<SootMethod, List<ReplaceableAlloc>> perMethodAllocs) {
+    private void printResults(Map<SootMethod, List<ReplaceableAlloc>> perMethodAllocs) {
         Map<Integer, String> byLine = new TreeMap<>();
         for (List<ReplaceableAlloc> ras : perMethodAllocs.values()) {
             for (ReplaceableAlloc ra : ras) {
