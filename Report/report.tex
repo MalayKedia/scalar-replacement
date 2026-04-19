@@ -1,6 +1,6 @@
 \documentclass[12pt,a4paper]{article}
 \usepackage[top=0.75in, bottom=0.75in, left=1in, right=1in]{geometry}
-\title{Partial Scalar Replacement of Objects}
+\title{Scalar Replacement of Objects}
 \author{Malay Kedia(23b1034) and Vishwaajith N.K(23b1038)}
 \date{April 19, 2026}
 
@@ -15,24 +15,147 @@ Scalar replacement is an optimization technique where we replace an object with 
     \item there is no instance in which there is a field which may point to this object.
     \item there is no instance in which it is passed as an argument to a method which changes the state of the object.
     \item It does not escape the method in which it is created.
+    \item It never has its identity used in any way, for example, it is never compared with another object using == or it is never used as a key in a hash map.
 \end{itemize}
 
-\subsection{Partial scalar replacement}
-Partial scalar replacement is an aggressive optimizationt that relaxes some of the conditions of scalar replacement. The conditions that we relax are the following:
-\begin{itemize}
-    \item there is no instance in which there is a global variable which may point to this object.
-    \item It does not escape the method in which it is created.
-\end{itemize}
+Rather than trying five or six different optimizations each in a shallow way, we chose to go deep on one. Most of our time was spent on soundness: making sure every allocation we scalar-replace is one that's safe to
+replace, and that the rewritten code is semantically equivalent to the
+original. We have tried to be complete in our implementation, and we have not left any corner cases unhandled. We have also decided to be conservative in our implementation, and would rather miss some opportunities for scalar replacement than to perform an unsafe optimization.
 
-We relax these conditions in the hope that most of the time, these conditions are not violated and we can still get the benefits of scalar replacement. And when these conditions are violated, we materialize the object and perform the necessary heap accesses and allocations. This optimization is more aggressive than scalar replacement and can give us better performance in some cases. But at the same time,if there is a lot of violations of the relaxed conditions, then we may end up with worse performance than no scalar replacement at all. 
+% \subsection{Partial scalar replacement}
+% Partial scalar replacement is an aggressive optimizationt that relaxes some of the conditions of scalar replacement. The conditions that we relax are the following:
+% \begin{itemize}
+%     \item there is no instance in which there is a global variable which may point to this object.
+%     \item It does not escape the method in which it is created.
+% \end{itemize}
 
-But, this optimization is not possible if there is a nontrivial constructor since we cannot guarantee that the constructor will not have any side effects. So, we only consider classes with trivial constructors for this optimization.
+% We relax these conditions in the hope that most of the time, these conditions are not violated and we can still get the benefits of scalar replacement. And when these conditions are violated, we materialize the object and perform the necessary heap accesses and allocations. This optimization is more aggressive than scalar replacement and can give us better performance in some cases. But at the same time,if there is a lot of violations of the relaxed conditions, then we may end up with worse performance than no scalar replacement at all. 
+
+% But, this optimization is not possible if there is a nontrivial constructor since we cannot guarantee that the constructor will not have any side effects. So, we only consider classes with trivial constructors for this optimization.
 
 \section{What analysis did we use?}
 
+The tool is a three-pass pipeline registered on Soot's whole-program \texttt{wjtp} pack.
+
+\textbf{Pass-1: per-method summaries}: For every user method we run a forward
+dataflow that tracks, for each local, which of the enclosing method's
+parameters it may directly alias. From that we derive a `MethodSummary`:
+which parameters escape (return, throw, stored to static or to another
+object's field), which are used for identity (`==`, `!=`, `instanceof`,
+`synchronized`), which are forwarded to callees whose parameters are
+themselves bad, which fields of each parameter are read, and which are
+written. A caller checks the method summary to determine if it can scalar-replace an argument. Phase 1 runs in reverse topological order of the call-graph SCCs
+computed by Tarjan, with pessimistic handling of cycles: every method in a
+non-singleton SCC is marked fully bad and stays that way.
+
+\textbf{Pass-2: per-allocation replaceability}: For each method we run a
+second forward dataflow, this time tagging each local with the set of
+allocation sites it may alias. When the alloc is used as the base of a
+field access we record the field in the allocation's \texttt{fieldsUsed} set; when
+it's passed to an invoke we consult the callee's summary and either accept
+the call (good callee with empty modified-field set — we'll specialize it
+later) or disqualify the alloc. Identity use, heap-store on the alloc's
+ref, ambiguous aliasing (the local may refer to multiple allocations), and
+passing to a mutating callee are disqualifiers.
+
 \section{How do we transform the code?}
+
+\textbf{Pass-3: IR rewrite}: For every surviving allocation we create one
+fresh local per accessed field (\texttt{srO<line>\_<idx>\_<field>}), splice the
+inlined constructor chain into the allocation site so the scalar locals
+get the right initial values, delete the \texttt{new X;} and the
+\texttt{specialinvoke <init>} statements, rewrite every field access on any local
+aliasing the alloc to the corresponding scalar local, and rewrite each
+helper call that receives the alloc into a call to a specialized static
+method that takes the scalar fields in place of the reference.
+Specialization is cached, and nested calls inside a specialized body that
+forward the scalarized parameter are rewritten recursively.
+
+
+\section{Partial scalar replacement: what we tried and why we dropped it}
+
+The obvious next step after "kill allocations that don't escape" is "kill
+allocations that only escape on some paths". If an object leaks into the
+heap only inside an if branch that's rarely taken, we'd rather keep the
+scalars on the hot path and materialize a real object just before the escape.
+
+Where we came unstuck was generalising the soundness conditions. The
+easy cases — single escape point on a branch, no post-escape field writes,
+simple constructors without static side effects — were clean. But as soon
+as we tried to combine them (multi-escape paths, control-flow joins where
+some predecessors had materialized and some hadn't, constructors with
+`counter++` style side effects that would double-execute if we called
+`<init>` at materialization) we ran into cases where a particular design
+choice was either too strict (giving up on obviously-safe cases) or too
+loose (producing semantically wrong output on testcases we couldn't
+enumerate in advance). We got to a point where each fix for one shape
+reintroduced a failure on another.
 
 \section{Results}
 
+ We ship ten single-file Java testcases in the \texttt{tests} directory that cover a variety of scenarios.Wall-clock timings
+ are under \texttt{-Xint}, averaged over five timed runs of three iterations each, with one warm-up run first to populate caches. Every row
+ includes an automatic correctness check: the stdout of the baseline and
+ the optimized run must match byte-for-byte before the timing is recorded.
 
+ \begin{table}[h]
+ \centering
+ \small
+ \begin{tabular}{r l r r r r}
+ \toprule
+ \textbf{Test} & \textbf{Scenario} & \textbf{Allocs} & \textbf{Base (ms)} & \textbf{Opt (ms)} & \textbf{Speedup} \\
+ \midrule
+ 1  & Simplest --- one alloc, one field        & 1 &  736 &  184 & \textbf{75\%} \\
+ 2  & Multi-field + constructor arg            & 1 &  909 &  311 & \textbf{65\%} \\
+ 3  & Passed to good-callee helper             & 2 &  936 &  356 & \textbf{61\%} \\
+ 4  & Nested specialization (two levels)       & 2 & 1246 &  606 & \textbf{51\%} \\
+ 5  & Three-level super chain                  & 1 & 1426 &  379 & \textbf{73\%} \\
+ 6  & Negative --- identity use                & 0 &  507 &  489 & 3\% \\
+ 7  & Negative --- mutating callee             & 1 &  964 &  922 & 4\% \\
+ 8  & Virtual dispatch devirtualized           & 1 & 1201 &  375 & \textbf{68\%} \\
+ 9  & Negative --- heap escape                 & 1 &  140 &  141 & 0\% \\
+ 10 & Cross / dot vector pipeline              & 4 & 3796 & 2103 & \textbf{44\%} \\
+ \bottomrule
+ \end{tabular}
+ \caption{Testcase wall-clock averages under \texttt{-Xint} (5 runs
+ $\times$ 3 iterations; warm-up discarded). Positive tests show 44--75\%
+ speedup; negatives stay within noise of baseline, as intended.}
+ \end{table}
+
+ \subsection{Results on DaCapo benchmarks}
+
+ With the core implementation working we tried applying it to the TamiFlex-prepared DaCapo 9.12 benchmarks. The
+ analyzer ran end-to-end on four out of five benchmarks (batik ran out of
+ heap in our per-local dataflow state at 6\,GB). The transformation completed in roughly a minute per
+ benchmark and produced valid class files that ran to completion with
+ output identical to the baseline.
+
+ The result on timing was dead flat:
+
+ \begin{table}[h]
+ \centering
+ \small
+ \begin{tabular}{l r r r r r}
+ \toprule
+ \textbf{Benchmark} & \textbf{Y verdicts} & \textbf{.class emitted} & \textbf{Base (ms)} & \textbf{Opt (ms)} & \textbf{$\
+$} \\
+ \midrule
+ avrora  & 8   & 5915 &    621 &    629 & +1.3\% \\
+ batik   & ---  & ---   & ---    & ---    & OOM ($>$6\,GB) \\
+ fop     & 5   & 8936 & 22644  & 22613  & $\sim$0\% \\
+ luindex & 4   & 5554 & 27739  & 27675  & $\sim$0\% \\
+ xalan   & 3   & 6025 & 40015  & 40804  & $-2\%$ \\
+ \bottomrule
+ \end{tabular}
+ \caption{DaCapo 9.12 on \texttt{-Xint}, 5 timed runs per configuration,
+ 3 iterations each. All runs produce baseline-identical output.}
+ \end{table}
+
+ Zero net speedup. The reason is exactly what the analyzer itself tells
+ us: each benchmark has a handful (3 to 8) of allocations that pass
+ all our checks, and the rest (millions of them per run) are ruled out by
+ the soundness conditions. Of the few we do replace, none happen to sit
+ on a hot loop. Avrora's replaced allocations are in ELF-parsing startup
+ code that runs once per invocation; xalan's are in rarely-executed
+ initialization.
 \end{document}
