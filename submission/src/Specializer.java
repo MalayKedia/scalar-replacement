@@ -126,18 +126,6 @@ public class Specializer {
 
     private void rewriteSpecializedBody(JimpleBody newBody, SootMethod orig,
             SortedSet<Integer> positions, List<List<SootField>> perPos) {
-        // Build orig→clone unit mapping FIRST, before any rewriting changes
-        // the cloned body's structure. importBodyContentsFrom preserves unit
-        // order, so parallel iteration aligns 1-to-1.
-        Map<Unit, Unit> origToClone = new HashMap<>();
-        {
-            Iterator<Unit> oit = orig.getActiveBody().getUnits().iterator();
-            Iterator<Unit> cit = newBody.getUnits().iterator();
-            while (oit.hasNext() && cit.hasNext()) {
-                origToClone.put(oit.next(), cit.next());
-            }
-        }
-
         // Map from scalarized position → map of field → fresh param local.
         Map<Integer, Map<SootField, Local>> scalarParamsByPos = new HashMap<>();
 
@@ -217,28 +205,6 @@ public class Specializer {
             if (holder != null) aliasesByPos.put(p, computeAliases(newBody, holder));
         }
 
-        // For each branch-escape scalarized position, allocate a
-        // materialized-ref local. Skip positions whose type's class has no
-        // no-arg constructor — we wouldn't know how to construct it safely.
-        Map<Integer, Local> matLocals = new HashMap<>();
-        Map<Integer, SootMethod> matInits = new HashMap<>();
-        MethodSummary origSummary = summaries.get(orig);
-        if (origSummary != null) {
-            for (int p : positions) {
-                if (origSummary.paramEscapes(p).isEmpty()) continue;
-                Type tp;
-                if (p == 0 && !orig.isStatic()) tp = orig.getDeclaringClass().getType();
-                else tp = orig.getParameterType(orig.isStatic() ? p : p - 1);
-                if (!(tp instanceof RefType)) continue;
-                SootMethod noArg = findNoArgInit(((RefType) tp).getSootClass());
-                if (noArg == null) continue;
-                Local mat = Jimple.v().newLocal("srMat_p" + p, tp);
-                newBody.getLocals().add(mat);
-                matLocals.put(p, mat);
-                matInits.put(p, noArg);
-            }
-        }
-
         // Rewrite: field accesses → scalar params; nested invokes that
         // touch scalarized holders → specialized static invokes.
         List<Unit> toRemoveCopies = new ArrayList<>();
@@ -274,53 +240,6 @@ public class Specializer {
             }
         }
         for (Unit u : toRemoveCopies) newBody.getUnits().remove(u);
-
-        // Emit materialization for each branch-escape scalarized position.
-        // At each escape unit in the original body, find the cloned unit and
-        // insert `mat = new T; specialinvoke mat.<init>(); mat.f = sr_f...`
-        // before it, then rewrite the escape operand to the mat local.
-        if (origSummary != null) {
-            for (Map.Entry<Integer, Local> e : matLocals.entrySet()) {
-                int p = e.getKey();
-                Local mat = e.getValue();
-                SootMethod init = matInits.get(p);
-                Map<SootField, Local> scalars = scalarParamsByPos.get(p);
-                Set<Local> aliases = aliasesByPos.get(p);
-                for (Unit origEsc : origSummary.paramEscapes(p)) {
-                    Unit cloneEsc = origToClone.get(origEsc);
-                    if (cloneEsc == null) continue;
-                    // Build the materialization block.
-                    List<Unit> block = new ArrayList<>();
-                    block.add(Jimple.v().newAssignStmt(
-                        mat, Jimple.v().newNewExpr((RefType) mat.getType())));
-                    block.add(Jimple.v().newInvokeStmt(
-                        Jimple.v().newSpecialInvokeExpr(mat, init.makeRef())));
-                    for (Map.Entry<SootField, Local> sl : scalars.entrySet()) {
-                        block.add(Jimple.v().newAssignStmt(
-                            Jimple.v().newInstanceFieldRef(mat, sl.getKey().makeRef()),
-                            sl.getValue()));
-                    }
-                    for (Unit b : block) newBody.getUnits().insertBefore(b, cloneEsc);
-                    // Replace any use-box in the escape unit that references
-                    // an alias of the scalarized position with the mat local.
-                    for (ValueBox vb : cloneEsc.getUseBoxes()) {
-                        Value v = vb.getValue();
-                        if (v instanceof Local && aliases != null && aliases.contains(v)) {
-                            vb.setValue(mat);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /** Look for a public or accessible no-arg {@code <init>} on {@code cls}. */
-    private static SootMethod findNoArgInit(SootClass cls) {
-        try {
-            return cls.getMethod("<init>", Collections.emptyList(), VoidType.v());
-        } catch (Exception ignored) {
-            return null;
-        }
     }
 
     /**

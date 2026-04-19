@@ -160,22 +160,17 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
                     .computeIfAbsent(i, k -> new HashSet<>())
                     .add(ref.getField());
             }
-            // Heap store of a param-aliased ref is a *recoverable* escape —
-            // if a caller passes scalars, the specialized version can
-            // materialize right before this store. Track the unit so the
-            // specializer knows where.
-            for (int j : rhsTag) recordEscapePoint(j, stmt);
+            // Any param-aliased value being stored into a heap location
+            // escapes conservatively — Phase 1 doesn't know whether the
+            // base outlives this method.
+            for (int j : rhsTag) result.escapingParams.add(j);
         } else if (lhs instanceof ArrayRef) {
-            for (int j : rhsTag) recordEscapePoint(j, stmt);
+            // Array element store: we don't track array slots, so any
+            // param-aliased rhs escapes.
+            for (int j : rhsTag) result.escapingParams.add(j);
         } else if (lhs instanceof StaticFieldRef) {
-            for (int j : rhsTag) recordEscapePoint(j, stmt);
+            for (int j : rhsTag) result.escapingParams.add(j);
         }
-    }
-
-    private void recordEscapePoint(int paramIdx, Unit u) {
-        List<Unit> list = result.paramEscapePoints
-            .computeIfAbsent(paramIdx, k -> new ArrayList<>());
-        if (!list.contains(u)) list.add(u);
     }
 
     /* -------- RHS resolution -------- */
@@ -284,7 +279,6 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
             boolean goodInAllTargets = true;
             boolean escapingInAny = false;
             boolean identityInAny = false;
-            boolean branchEscapeInAny = false;
             Set<SootField> modAt = new HashSet<>();
             Set<SootField> readAt = new HashSet<>();
             Set<Integer> transitiveCallSites = new HashSet<>();
@@ -299,7 +293,6 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
                     if (!s.goodParams.contains(i)) goodInAllTargets = false;
                     if (s.escapingParams.contains(i)) escapingInAny = true;
                     if (s.identityUsedParams.contains(i)) identityInAny = true;
-                    if (!s.paramEscapes(i).isEmpty()) branchEscapeInAny = true;
                     modAt.addAll(s.allModified(i));
                     readAt.addAll(s.read(i));
                     transitiveCallSites.addAll(
@@ -316,12 +309,6 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
                 if (escapingInAny) result.escapingParams.add(p);
                 if (identityInAny) result.identityUsedParams.add(p);
                 if (!goodInAllTargets) result.forwardedBadParams.add(p);
-                // Branch-escaping callee means our own param gets a
-                // materializable escape point at this invoke unit — the
-                // specialized version of the callee will materialize
-                // internally, but from our perspective the ref is "needed"
-                // at the invoke boundary.
-                if (branchEscapeInAny) recordEscapePoint(p, stmt);
                 if (!modAt.isEmpty()) {
                     result.calleeModifiedFields
                         .computeIfAbsent(p, k -> new HashSet<>())

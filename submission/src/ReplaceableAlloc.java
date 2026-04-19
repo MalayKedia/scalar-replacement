@@ -41,22 +41,6 @@ public class ReplaceableAlloc {
      *  Informational: fed to the {@code Y[...]} output. */
     final Set<Integer> callSiteLines = new TreeSet<>();
 
-    /** Units where this allocation's reference escapes (return, throw, heap
-     *  store, arg to a bad callee). Non-empty → this is a partial-escape
-     *  candidate that materializes at each of these points instead of being
-     *  fully scalar-replaced. */
-    final List<Unit> escapePoints = new ArrayList<>();
-
-    /** Units that write a field of this allocation (direct stores, base
-     *  aliases the alloc). Used to verify no post-escape writes. */
-    final List<Unit> fieldWrites = new ArrayList<>();
-
-    /** True iff at least one helper-callee at one of the scalarized positions
-     *  has a non-empty {@code paramEscapePoints} for that position — meaning
-     *  materialization will happen inside the specialized callee's body, not
-     *  in this method. Used to pick the {@code L} marker. */
-    boolean hasCalleeMaterialization = false;
-
     public ReplaceableAlloc(Unit site, SootClass allocClass) {
         this.site = site;
         this.allocClass = allocClass;

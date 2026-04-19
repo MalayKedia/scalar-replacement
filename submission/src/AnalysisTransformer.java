@@ -208,17 +208,7 @@ public class AnalysisTransformer extends SceneTransformer {
                 int line = ra.site.getJavaSourceStartLineNumber();
                 StringJoiner sj = new StringJoiner(",", "[", "]");
                 for (int l : ra.callSiteLines) sj.add(String.valueOf(l));
-                // Y: no materialization needed anywhere.
-                // P: materialization emitted in this method body (direct
-                //    escape unit inside the caller).
-                // L: materialization emitted inside a specialized callee
-                //    (interprocedural partial escape — the caller never sees
-                //    a heap allocation).
-                String marker;
-                if (!ra.escapePoints.isEmpty())               marker = "P";
-                else if (ra.hasCalleeMaterialization)         marker = "L";
-                else                                          marker = "Y";
-                byLine.put(line, "O" + line + " = " + marker + sj);
+                byLine.put(line, "O" + line + " = Y" + sj);
             }
         }
         for (String s : byLine.values()) System.out.println(s);

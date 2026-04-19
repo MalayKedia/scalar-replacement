@@ -67,123 +67,10 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
             if (disqualified.contains(site)) continue;
             if (ra.initCall == null || ra.initTarget == null) continue;
             if (!validateAndWalkChain(ra)) continue;
-            // Partial-escape soundness: if the alloc has any escape points,
-            // we emit materialization there and keep using scalars elsewhere.
-            // That's only sound if no field-write to the alloc is reachable
-            // from any escape point — otherwise post-escape writes would
-            // diverge from the materialized heap snapshot.
-            if (!ra.escapePoints.isEmpty() && hasPostEscapeWrite(ra)) continue;
-            // Any P or L case would run <init> twice: once inlined at the
-            // alloc site and once at a materialization site. That's fine
-            // iff <init> only writes this's fields — any other side effect
-            // (static updates, non-super method calls, new expressions,
-            // throws) would double-execute. Restrict P/L to simple inits.
-            boolean wouldBePartial =
-                !ra.escapePoints.isEmpty() || ra.hasCalleeMaterialization;
-            if (wouldBePartial && !isSimpleInitChain(ra.initChain)) continue;
             populateChainFields(ra);
             r.add(ra);
         }
         return r;
-    }
-
-    /**
-     * True iff every constructor in the chain only performs direct
-     * {@code this.f = ...} stores, super/delegated {@code <init>} calls,
-     * local arithmetic/copies, and control flow over simple values. Any
-     * static-field access, non-super invoke, {@code new} expression, or
-     * throw in the chain makes it unsafe for P/L transformation because
-     * we'd double-execute those side effects.
-     */
-    private boolean isSimpleInitChain(List<SootMethod> chain) {
-        for (SootMethod c : chain) {
-            if (c.getDeclaringClass().getName().equals("java.lang.Object")
-                    && c.getName().equals("<init>")) continue;
-            if (!c.isConcrete()) return false;
-            if (!isSimpleInitBody(c)) return false;
-        }
-        return true;
-    }
-
-    private boolean isSimpleInitBody(SootMethod ctor) {
-        Body b = ctor.getActiveBody();
-        Local thisLocal = b.getThisLocal();
-        for (Unit u : b.getUnits()) {
-            Stmt s = (Stmt) u;
-            if (s instanceof IdentityStmt) continue;
-            if (s instanceof ReturnVoidStmt) continue;
-            if (s instanceof GotoStmt) continue;
-            if (s instanceof IfStmt) {
-                if (!isSimpleValue(((IfStmt) s).getCondition(), thisLocal)) return false;
-                continue;
-            }
-            if (s instanceof InvokeStmt) {
-                InvokeExpr inv = ((InvokeStmt) s).getInvokeExpr();
-                // Allow super/delegated <init> on this.
-                if (inv instanceof SpecialInvokeExpr
-                        && inv.getMethodRef().getName().equals("<init>")
-                        && ((SpecialInvokeExpr) inv).getBase().equals(thisLocal)) continue;
-                return false;
-            }
-            if (s instanceof AssignStmt) {
-                AssignStmt a = (AssignStmt) s;
-                if (!isSimpleLhs(a.getLeftOp(), thisLocal)) return false;
-                if (!isSimpleValue(a.getRightOp(), thisLocal)) return false;
-                continue;
-            }
-            return false;
-        }
-        return true;
-    }
-
-    private boolean isSimpleLhs(Value v, Local thisLocal) {
-        if (v instanceof Local) return true;
-        if (v instanceof InstanceFieldRef)
-            return ((InstanceFieldRef) v).getBase().equals(thisLocal);
-        return false;  // static/array writes disqualify
-    }
-
-    private boolean isSimpleValue(Value v, Local thisLocal) {
-        if (v instanceof Constant) return true;
-        if (v instanceof Local) return true;
-        if (v instanceof InstanceFieldRef)
-            return ((InstanceFieldRef) v).getBase().equals(thisLocal);
-        if (v instanceof BinopExpr) {
-            BinopExpr b = (BinopExpr) v;
-            return isSimpleValue(b.getOp1(), thisLocal)
-                && isSimpleValue(b.getOp2(), thisLocal);
-        }
-        if (v instanceof UnopExpr)
-            return isSimpleValue(((UnopExpr) v).getOp(), thisLocal);
-        if (v instanceof CastExpr)
-            return isSimpleValue(((CastExpr) v).getOp(), thisLocal);
-        return false;  // static refs, new, invoke, array ref → unsafe
-    }
-
-    /**
-     * True iff any unit in {@code ra.fieldWrites} is CFG-reachable from any
-     * unit in {@code ra.escapePoints} (i.e., a post-escape field write could
-     * happen). BFS over the method's CFG.
-     */
-    private boolean hasPostEscapeWrite(ReplaceableAlloc ra) {
-        if (ra.fieldWrites.isEmpty()) return false;
-        DirectedGraph<Unit> cfg = graph;  // ExceptionalUnitGraph from ForwardFlowAnalysis
-        Set<Unit> writes = new HashSet<>(ra.fieldWrites);
-        Set<Unit> visited = new HashSet<>();
-        Deque<Unit> work = new ArrayDeque<>();
-        for (Unit e : ra.escapePoints) {
-            for (Unit s : cfg.getSuccsOf(e)) {
-                if (visited.add(s)) work.add(s);
-            }
-        }
-        while (!work.isEmpty()) {
-            Unit u = work.poll();
-            if (writes.contains(u)) return true;
-            for (Unit s : cfg.getSuccsOf(u)) {
-                if (visited.add(s)) work.add(s);
-            }
-        }
-        return false;
     }
 
     private boolean validateAndWalkChain(ReplaceableAlloc ra) {
@@ -259,13 +146,11 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
         }
 
         if (stmt instanceof ReturnStmt) {
-            // Return is a terminal escape — ref outlives our method.
-            recordEscape(localTag(((ReturnStmt) stmt).getOp(), in), (Unit) stmt);
+            disqualifyAll(localTag(((ReturnStmt) stmt).getOp(), in));
             return;
         }
         if (stmt instanceof ThrowStmt) {
-            // Throw is a terminal escape — ref flows to the exception handler.
-            recordEscape(localTag(((ThrowStmt) stmt).getOp(), in), (Unit) stmt);
+            disqualifyAll(localTag(((ThrowStmt) stmt).getOp(), in));
             return;
         }
         if (stmt instanceof IfStmt) {
@@ -311,18 +196,16 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
             // all of them.
             disqualifyIfAmbiguous(baseTag);
             for (Unit u : baseTag) {
-                if (allocs.containsKey(u) && !disqualified.contains(u)) {
-                    ReplaceableAlloc ra = allocs.get(u);
-                    ra.fieldsUsed.add(ref.getField());
-                    if (!ra.fieldWrites.contains(stmt)) ra.fieldWrites.add(stmt);
-                }
+                if (allocs.containsKey(u) && !disqualified.contains(u))
+                    allocs.get(u).fieldsUsed.add(ref.getField());
             }
-            // A ref being stored into a heap slot is an escape.
-            recordEscape(rhsTag, (Unit) stmt);
+            // Any param/alloc ref stored into a heap location escapes from
+            // our scalar-replacement perspective — disqualify.
+            disqualifyAll(rhsTag);
         } else if (lhs instanceof ArrayRef) {
-            recordEscape(rhsTag, (Unit) stmt);
+            disqualifyAll(rhsTag);
         } else if (lhs instanceof StaticFieldRef) {
-            recordEscape(rhsTag, (Unit) stmt);
+            disqualifyAll(rhsTag);
         }
     }
 
@@ -446,41 +329,25 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
     private boolean checkArgAgainstCallee(Set<Unit> argTag, int paramIdx, Stmt stmt) {
         List<MethodSummary> callees = getCalleeSummaries(stmt);
         if (callees.isEmpty()) {
-            // Unknown target — be conservative and hard-disqualify. We can't
-            // partial-escape because we don't know whether the callee mutates.
             disqualifyAll(argTag);
             return false;
         }
         for (MethodSummary s : callees) {
-            if (paramIdx >= s.paramCount) {
+            if (paramIdx >= s.paramCount
+                    || !s.goodParams.contains(paramIdx)
+                    || !s.allModified(paramIdx).isEmpty()) {
                 disqualifyAll(argTag);
-                return false;
-            }
-            // A callee that *mutates* the alloc's fields breaks our "scalars
-            // stay valid through escape" invariant — hard-disqualify.
-            if (!s.allModified(paramIdx).isEmpty()) {
-                disqualifyAll(argTag);
-                return false;
-            }
-            // Callee's param isn't good (escapes/identity/forwarded) but
-            // doesn't mutate — treat as an escape point (partial candidate).
-            if (!s.goodParams.contains(paramIdx)) {
-                recordEscape(argTag, (Unit) stmt);
                 return false;
             }
         }
         // All targets accept: accumulate read-field contributions into the
-        // alloc's fieldsUsed (these become scalar locals in Phase 3). Also
-        // note if any target has a non-empty paramEscapePoints — that means
-        // materialization happens in the specialized callee body ("L" case).
+        // alloc's fieldsUsed (these become scalar locals in Phase 3).
         for (MethodSummary s : callees) {
             Set<SootField> reads = s.read(paramIdx);
-            boolean calleeHasEscape = !s.paramEscapes(paramIdx).isEmpty();
+            if (reads.isEmpty()) continue;
             for (Unit u : argTag) {
-                if (!allocs.containsKey(u) || disqualified.contains(u)) continue;
-                ReplaceableAlloc ra = allocs.get(u);
-                if (!reads.isEmpty()) ra.fieldsUsed.addAll(reads);
-                if (calleeHasEscape) ra.hasCalleeMaterialization = true;
+                if (allocs.containsKey(u) && !disqualified.contains(u))
+                    allocs.get(u).fieldsUsed.addAll(reads);
             }
         }
         return true;
@@ -528,22 +395,6 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
 
     private void disqualifyAll(Collection<Unit> sites) {
         for (Unit u : sites) disqualify(u);
-    }
-
-    /**
-     * Record {@code escapeUnit} as an escape point for every alloc in
-     * {@code allocSites}. The alloc stays a candidate (the dataflow keeps
-     * tracking it); later we'll verify that no post-escape writes occur and
-     * then either scalar-replace with transient materialization or hard-
-     * disqualify.
-     */
-    private void recordEscape(Collection<Unit> allocSites, Unit escapeUnit) {
-        for (Unit site : allocSites) {
-            if (!allocs.containsKey(site) || disqualified.contains(site)) continue;
-            ReplaceableAlloc ra = allocs.get(site);
-            if (!ra.escapePoints.contains(escapeUnit))
-                ra.escapePoints.add(escapeUnit);
-        }
     }
 
     /**

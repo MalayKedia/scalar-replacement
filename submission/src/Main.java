@@ -16,11 +16,10 @@ import soot.Transform;
  *
  * Pipeline (registered on Soot's {@code wjtp} pack):
  *   Phase 1 — per-method parameter summaries (see {@link PointerAnalysis}).
- *   Phase 2 — per-allocation scalar-replaceability + partial-escape
- *             classification (see {@link AllocationAnalysis}).
- *   Phase 3 — IR rewrite: scalar-local materialization, constructor-chain
- *             inlining, callee specialization, on-demand object
- *             reconstruction at escape points
+ *   Phase 2 — per-allocation scalar-replaceability
+ *             (see {@link AllocationAnalysis}).
+ *   Phase 3 — IR rewrite: scalar-local allocation, constructor-chain
+ *             inlining, good-callee specialization
  *             (see {@link Phase3Transformer}, {@link InitInliner},
  *             {@link Specializer}).
  */

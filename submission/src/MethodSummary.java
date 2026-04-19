@@ -1,7 +1,6 @@
 import java.util.*;
 import soot.SootField;
 import soot.SootMethod;
-import soot.Unit;
 
 /**
  * Phase-1 summary of a method, indexed by parameter.
@@ -22,20 +21,8 @@ public class MethodSummary {
     /** Params that satisfy the contract. Derived from the bad sets. */
     final Set<Integer> goodParams          = new HashSet<>();
 
-    /** Param ref exposed beyond this method in a way that *can't* be
-     *  recovered by in-method materialization — return, throw, thread
-     *  capture. Blocks specialization. */
+    /** Param ref flowed to return, static store, foreign field store, throw, thread capture, etc. */
     final Set<Integer> escapingParams      = new HashSet<>();
-
-    /**
-     * Per-param list of units inside this method body where the param's
-     * reference escapes in a *recoverable* way (static store, instance
-     * field store, array store, invoke-arg to a bad callee). A caller that
-     * passes scalars at this position can still do so: the specialized
-     * version of this method emits a materialization at each of these
-     * units internally. Non-empty does NOT block specialization.
-     */
-    final Map<Integer, List<Unit>> paramEscapePoints = new HashMap<>();
 
     /** Param ref used in ==/!=/instanceof/synchronized/... */
     final Set<Integer> identityUsedParams  = new HashSet<>();
@@ -107,10 +94,6 @@ public class MethodSummary {
 
     Set<SootField> nonChainCalleeModified(int i) {
         return nonChainCalleeModifiedFields.getOrDefault(i, Collections.emptySet());
-    }
-
-    List<Unit> paramEscapes(int i) {
-        return paramEscapePoints.getOrDefault(i, Collections.emptyList());
     }
 
     /**
