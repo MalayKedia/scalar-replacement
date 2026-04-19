@@ -1,0 +1,2 @@
+We have thought of the whole flow of the analysis and the required logic on paper without AI. 
+We wrote functions to implement the same, trying to handle the more important cases and conditions, while using AI to extend our code for more conditions. We also used AI a bit to refactor the code and clean some aspects of it.
