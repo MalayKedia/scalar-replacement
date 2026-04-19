@@ -1,0 +1,38 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[top=0.75in, bottom=0.75in, left=1in, right=1in]{geometry}
+\title{Partial Scalar Replacement of Objects}
+\author{Malay Kedia(23b1034) and Vishwaajith N.K(23b1038)}
+\date{April 19, 2026}
+
+\begin{document}
+\maketitle
+\section{What are we doing?}
+\subsection{Scalar replacement}
+Scalar replacement is an optimization technique where we replace an object with its individual fields and also convert any function calls with that object as the reciever to static calls. This is done to reduce the number of Heap accesses and allocations, which are expensive operations. But this optimization is a per object optimization which is only possible under very specific conditions.These conditions are 
+\begin{itemize}
+    \item there is no instance in which there is a local variable which may point to this object and some other object.
+    \item there is no instance in which there is a global variable which may point to this object.
+    \item there is no instance in which there is a field which may point to this object.
+    \item there is no instance in which it is passed as an argument to a method which changes the state of the object.
+    \item It does not escape the method in which it is created.
+\end{itemize}
+
+\subsection{Partial scalar replacement}
+Partial scalar replacement is an aggressive optimizationt that relaxes some of the conditions of scalar replacement. The conditions that we relax are the following:
+\begin{itemize}
+    \item there is no instance in which there is a global variable which may point to this object.
+    \item It does not escape the method in which it is created.
+\end{itemize}
+
+We relax these conditions in the hope that most of the time, these conditions are not violated and we can still get the benefits of scalar replacement. And when these conditions are violated, we materialize the object and perform the necessary heap accesses and allocations. This optimization is more aggressive than scalar replacement and can give us better performance in some cases. But at the same time,if there is a lot of violations of the relaxed conditions, then we may end up with worse performance than no scalar replacement at all. 
+
+But, this optimization is not possible if there is a nontrivial constructor since we cannot guarantee that the constructor will not have any side effects. So, we only consider classes with trivial constructors for this optimization.
+
+\section{What analysis did we use?}
+
+\section{How do we transform the code?}
+
+\section{Results}
+
+
+\end{document}
