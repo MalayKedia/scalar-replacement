@@ -5,14 +5,19 @@ import soot.Transform;
  * Entry point for the scalar-replacement optimizer.
  *
  * Usage:
- *   java Main &lt;mainClass&gt; &lt;classPath&gt; &lt;outputDir&gt; [--no-transform] [--format c|J]
+ *   java Main &lt;mainClass&gt; &lt;classPath&gt; &lt;outputDir&gt;
+ *       [--no-transform]
+ *       [--jimple-base &lt;dir&gt;] [--jimple-opt &lt;dir&gt;]
  *
- * - mainClass    The testcase's public class name (e.g. {@code Test3}).
- * - classPath    Directory containing the testcase's compiled .class files.
- * - outputDir    Directory to write transformed .class or .jimple output into.
- * - --no-transform    Skip Phase 3 (analysis only; leaves IR untouched).
- * - --format c|J      Output format: {@code c} = bytecode .class (default),
- *                     {@code J} = Jimple .jimple.
+ * - mainClass           The testcase's public class name (e.g. {@code Test3}).
+ * - classPath           Directory containing the testcase's compiled .class files.
+ * - outputDir           Directory for transformed .class output (always emitted).
+ * - --no-transform      Skip Phase 3 (analysis only; leaves IR untouched).
+ * - --jimple-base DIR   Dump untransformed Jimple to DIR (before Phase 3).
+ * - --jimple-opt  DIR   Dump transformed Jimple to DIR (after Phase 3).
+ *
+ * A single Soot session produces class files AND (optionally) both Jimple
+ * dumps — no need to re-run.
  *
  * Pipeline (registered on Soot's {@code wjtp} pack):
  *   Phase 1 — per-method parameter summaries (see {@link PointerAnalysis}).
@@ -28,7 +33,7 @@ public class Main {
     public static void main(String[] args) {
         if (args.length < 3) {
             System.err.println("Usage: Main <mainClass> <classPath> <outputDir> "
-                + "[--no-transform] [--format c|J]");
+                + "[--no-transform] [--jimple-base <dir>] [--jimple-opt <dir>]");
             System.exit(1);
         }
 
@@ -36,18 +41,23 @@ public class Main {
         String classPath = args[1];
         String outputDir = args[2];
         boolean transform = true;
-        String format = "c";
+        String jimpleBaseDir = null;
+        String jimpleOptDir = null;
 
         for (int i = 3; i < args.length; i++) {
             if (args[i].equals("--no-transform")) {
                 transform = false;
-            } else if (args[i].equals("--format") && i + 1 < args.length) {
-                format = args[++i];
+            } else if (args[i].equals("--jimple-base") && i + 1 < args.length) {
+                jimpleBaseDir = args[++i];
+            } else if (args[i].equals("--jimple-opt") && i + 1 < args.length) {
+                jimpleOptDir = args[++i];
             }
         }
 
         AnalysisTransformer analysisTransformer = new AnalysisTransformer();
         analysisTransformer.enableTransformation = transform;
+        analysisTransformer.baseJimpleDir = jimpleBaseDir;
+        analysisTransformer.optJimpleDir = jimpleOptDir;
         PackManager.v().getPack("wjtp").add(
             new Transform("wjtp.dfa", analysisTransformer));
 
@@ -71,7 +81,7 @@ public class Main {
             // verifier / decompilers reject.
             "-p", "jb.ulp", "enabled:false",
             "-p", "jb.lp", "enabled:false",
-            "-f", format,
+            "-f", "c",
             "-t", "1",
             "-main-class", mainClass,
             "-process-dir", classPath

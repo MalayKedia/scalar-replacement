@@ -28,8 +28,17 @@ public class InitInliner {
     private final Specializer specializer;
     private final List<Unit> emitted = new ArrayList<>();
 
-    /** Counter for renaming cloned locals to avoid collision with the caller. */
-    private int renameCounter = 0;
+    /**
+     * Counter for renaming cloned locals to avoid collision with the caller
+     * or with other allocations in the same body. Static so every
+     * {@code sr_il<n>_<origName>} synthesized in this JVM session has a
+     * unique {@code n} — two allocations in one method body each construct
+     * their own {@link InitInliner} instance, so a per-instance counter
+     * would reset and cause name collisions (observed as
+     * "Register contains wrong type" verifier errors with duplicate locals
+     * of different types).
+     */
+    private static int renameCounter = 0;
 
     public InitInliner(Body callerBody, Map<SootField, Local> scalars,
                        Specializer specializer) {

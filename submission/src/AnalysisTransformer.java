@@ -1,3 +1,7 @@
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.PrintWriter;
 import java.util.*;
 import soot.*;
 import soot.jimple.toolkits.callgraph.*;
@@ -27,6 +31,14 @@ public class AnalysisTransformer extends SceneTransformer {
     /** Placeholder for Phase 3. Phase 1 does not mutate IR; this flag is unused
      *  until transformation lands, but SootRunner still toggles it. */
     boolean enableTransformation = true;
+
+    /** If non-null, dump untransformed Jimple for every application class
+     *  to this directory (one .jimple file per class) BEFORE Phase 3 runs. */
+    String baseJimpleDir = null;
+
+    /** If non-null, dump post-transformation Jimple for every application
+     *  class to this directory AFTER Phase 3 runs. */
+    String optJimpleDir = null;
 
     @Override
     protected void internalTransform(String phaseName, Map<String, String> options) {
@@ -78,6 +90,10 @@ public class AnalysisTransformer extends SceneTransformer {
 
         printYResults(perMethodAllocs);
 
+        // Dump untransformed Jimple before Phase 3 runs (bodies haven't
+        // been mutated yet).
+        if (baseJimpleDir != null) dumpJimpleTo(baseJimpleDir);
+
         // Phase 3: IR transformation.
         if (enableTransformation) {
             Specializer specializer = new Specializer(summaries);
@@ -91,6 +107,31 @@ public class AnalysisTransformer extends SceneTransformer {
                     System.err.println("Phase 3 failed for " + e.getKey()
                         + ": " + ex);
                 }
+            }
+        }
+
+        // Dump transformed Jimple after Phase 3. Soot's normal class-file
+        // writer will run next and produce .class files in parallel — we
+        // don't have to re-run Soot for the Jimple format.
+        if (optJimpleDir != null) dumpJimpleTo(optJimpleDir);
+    }
+
+    /**
+     * Write one {@code <ClassName>.jimple} file per application class into
+     * {@code dir}. Uses {@link Printer} directly so we get Jimple text for
+     * the IR state <em>right now</em>, independent of Soot's {@code -f}
+     * option (which governs only the final output writer).
+     */
+    private void dumpJimpleTo(String dir) {
+        File outDir = new File(dir);
+        if (!outDir.exists()) outDir.mkdirs();
+        for (SootClass cls : Scene.v().getApplicationClasses()) {
+            File f = new File(outDir, cls.getName() + ".jimple");
+            try (PrintWriter pw = new PrintWriter(new FileWriter(f))) {
+                Printer.v().printTo(cls, pw);
+            } catch (IOException e) {
+                System.err.println("jimple dump failed for " + cls.getName()
+                    + ": " + e.getMessage());
             }
         }
     }

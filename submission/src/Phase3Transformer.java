@@ -70,7 +70,13 @@ public class Phase3Transformer {
             inliner.inlineChain(ra.initChain, (InvokeStmt) toInvokeStmt(ra.initCall));
             emitted.addAll(inliner.getEmitted());
 
-            toInsertBefore.put(ra.site, emitted);
+            // Splice the scalar-init block in just BEFORE the <init>
+            // invoke, not before the `new` — Jimple typically emits the
+            // <init>'s argument-evaluation statements between the `new`
+            // and the `specialinvoke`, so the inlined constructor body's
+            // references to those actuals must come after them in the
+            // unit chain.
+            toInsertBefore.put(ra.initCall, emitted);
             toRemove.add(ra.site);
             toRemove.add(ra.initCall);
         }
