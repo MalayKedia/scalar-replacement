@@ -1,8 +1,23 @@
 #!/usr/bin/env bash
 
-# Y = pure scalar replacement (no materialization anywhere)
-# P = partial escape, materialize in current method body
-# L = partial escape, materialize inside specialized callee body
+# PA4 entry-point script.
+
+# Output layout (after running):
+#   out/
+#     class/<TestN>/
+#       base/   — untransformed .class files (from javac)
+#       opt/    — transformed .class files (from our optimizer)
+#     jimple/<TestN>/
+#       base/   — untransformed Jimple (Soot with --no-transform)
+#       opt/    — transformed Jimple (Soot with Phase 3)
+#
+# Per testcase the script prints:
+#   - the per-allocation `O<line> = Y[...]` verdicts from the analyzer
+#   - base/opt wall-clock averaged over $ITERATIONS runs under `-Xint`
+
+# Overrideable env vars:
+#   SOOT_JAR       — path to Soot jar (default: ./soot-...jar)
+#   ITERATIONS     — timed runs per test (default: 5)
 
 set -eu
 cd "$(dirname "$0")"
@@ -12,81 +27,83 @@ SRC_DIR="src"
 BUILD_DIR="build"
 TESTS_DIR="tests"
 OUT_DIR="out"
+CLASS_DIR="$OUT_DIR/class"
+JIMPLE_DIR="$OUT_DIR/jimple"
 
 ITERATIONS="${ITERATIONS:-5}"
 JVM_FLAGS="-Xint"
 
 if [ ! -f "$SOOT_JAR" ]; then
-    echo "error: Soot jar not found at $SOOT_JAR"
+    echo "error: Soot jar not found at $SOOT_JAR" >&2
     exit 1
 fi
 
-# Clean everything
+# 1. Clean previous artifacts
 rm -rf "$BUILD_DIR" "$OUT_DIR"
 find "$SRC_DIR" "$TESTS_DIR" -name "*.class" -delete 2>/dev/null || true
 
-# Compile out code
+# 2. Compile the optimizer
 mkdir -p "$BUILD_DIR"
 javac -cp "$SOOT_JAR" -sourcepath "$SRC_DIR" -d "$BUILD_DIR" "$SRC_DIR"/Main.java
 
-# Run each testcase
-mkdir -p "$OUT_DIR"
+mkdir -p "$CLASS_DIR" "$JIMPLE_DIR"
 
-printf "\n%-8s %10s %10s %10s %7s %8s\n" \
-    "Test" "base(ms)" "opt(ms)" "speedup" "allocs" "Y/P/L"
-echo "-----------------------------------------------------------------"
+time_avg() {
+    local cp="$1" main="$2"
+    # warm-up
+    java $JVM_FLAGS -cp "$cp" "$main" > /dev/null 2>&1 || true
+    local total=0 t1 t2
+    for _ in $(seq 1 "$ITERATIONS"); do
+        t1=$(date +%s%N)
+        java $JVM_FLAGS -cp "$cp" "$main" > /dev/null 2>&1 || true
+        t2=$(date +%s%N)
+        total=$((total + (t2 - t1) / 1000000))
+    done
+    echo $((total / ITERATIONS))
+}
 
-for src in "$TESTS_DIR"/Test*.java; do
+# 3. Per testcase compile, optimize, time, and check correctness.
+printf "%-8s %10s %10s %10s %7s   %s\n" \
+    "Test" "base(ms)" "opt(ms)" "speedup" "allocs" "correctness"
+echo "-------------------------------------------------------------"
+
+for src in $(ls "$TESTS_DIR"/Test*.java | sort -V); do
     [ -f "$src" ] || continue
     name=$(basename "$src" .java)
-    base_dir="$OUT_DIR/$name/base"
-    opt_dir="$OUT_DIR/$name/opt"
-    mkdir -p "$base_dir" "$opt_dir"
 
-    # a. Compile testcase
-    if ! javac -d "$base_dir" "$src" 2>/dev/null; then
+    class_base="$CLASS_DIR/$name/base"
+    class_opt="$CLASS_DIR/$name/opt"
+    jimple_base="$JIMPLE_DIR/$name/base"
+    jimple_opt="$JIMPLE_DIR/$name/opt"
+    mkdir -p "$class_base" "$class_opt" "$jimple_base" "$jimple_opt"
+
+    # (a) Compile testcase → class_base
+    if ! javac -d "$class_base" "$src" 2>/dev/null; then
         printf "%-8s  compile FAIL\n" "$name"
         continue
     fi
 
-    # b. Run the optimizer, capture Y/P/L lines
-    results=$(java -cp "$BUILD_DIR:$SOOT_JAR" Main "$name" "$base_dir" "$opt_dir" \
-                --format c 2>/dev/null | grep -E "^O[0-9]+ = [YPL]" || true)
-    y=$(printf "%s\n" "$results" | grep -c "= Y\[" || true)
-    p=$(printf "%s\n" "$results" | grep -c "= P\[" || true)
-    l=$(printf "%s\n" "$results" | grep -c "= L\[" || true)
-    total=$((y + p + l))
+    # (b) Run optimizer once — emits transformed class files into $class_opt
+    #     and both Jimple dumps (pre/post Phase 3) into the jimple dirs.
+    results=$(java -cp "$BUILD_DIR:$SOOT_JAR" Main "$name" "$class_base" "$class_opt" \
+                --jimple-base "$jimple_base" \
+                --jimple-opt  "$jimple_opt" \
+                2>/dev/null | grep -E "^O[0-9]+ = " || true)
 
-    if [ ! -f "$opt_dir/$name.class" ]; then
-        printf "%-8s  transform FAIL (no $name.class emitted)\n" "$name"
+    if [ ! -f "$class_opt/$name.class" ]; then
+        printf "%-8s  transform FAIL (no %s.class emitted)\n" "$name" "$name"
         continue
     fi
 
-    # c. Time baseline (one warm-up run + ITERATIONS timed runs)
-    java $JVM_FLAGS -cp "$base_dir" "$name" > /dev/null 2>&1 || true
-    total_base=0
-    for i in $(seq 1 "$ITERATIONS"); do
-        t1=$(date +%s%N)
-        java $JVM_FLAGS -cp "$base_dir" "$name" > /dev/null 2>&1 || true
-        t2=$(date +%s%N)
-        total_base=$((total_base + (t2 - t1) / 1000000))
-    done
-    avg_base=$((total_base / ITERATIONS))
+    alloc_count=$(printf "%s\n" "$results" | grep -c "^O" || true)
 
-    # Time optimized
-    java $JVM_FLAGS -cp "$opt_dir" "$name" > /dev/null 2>&1 || true
-    total_opt=0
-    for i in $(seq 1 "$ITERATIONS"); do
-        t1=$(date +%s%N)
-        java $JVM_FLAGS -cp "$opt_dir" "$name" > /dev/null 2>&1 || true
-        t2=$(date +%s%N)
-        total_opt=$((total_opt + (t2 - t1) / 1000000))
-    done
-    avg_opt=$((total_opt / ITERATIONS))
+    # (e) Time base vs. opt
+    avg_base=$(time_avg "$class_base" "$name")
+    avg_opt=$(time_avg "$class_opt"  "$name")
 
-    # d. Correctness check — base vs opt output must match
-    base_out=$(java $JVM_FLAGS -cp "$base_dir" "$name" 2>&1 || true)
-    opt_out=$(java $JVM_FLAGS -cp "$opt_dir" "$name" 2>&1 || true)
+    # (f) Correctness: stdout must match
+    base_out=$(java $JVM_FLAGS -cp "$class_base" "$name" 2>&1 || true)
+    opt_out=$(java  $JVM_FLAGS -cp "$class_opt"  "$name" 2>&1 || true)
     if [ "$base_out" = "$opt_out" ]; then
         correctness="ok"
     else
@@ -99,9 +116,11 @@ for src in "$TESTS_DIR"/Test*.java; do
         speedup=0
     fi
 
-    printf "%-8s %10d %10d %9d%% %7d %2d/%d/%d   [%s]\n" \
-        "$name" "$avg_base" "$avg_opt" "$speedup" "$total" "$y" "$p" "$l" "$correctness"
-done
+    printf "%-8s %10d %10d %9d%% %7d   %s\n" \
+        "$name" "$avg_base" "$avg_opt" "$speedup" "$alloc_count" "$correctness"
 
-echo
-echo "Output .class files: $OUT_DIR/<test>/opt/"
+    # Show the per-allocation verdicts inline for easy inspection.
+    if [ -n "$results" ]; then
+        printf "%s\n" "$results" | sed 's/^/           /'
+    fi
+done
