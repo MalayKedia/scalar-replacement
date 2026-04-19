@@ -73,10 +73,91 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
             // from any escape point — otherwise post-escape writes would
             // diverge from the materialized heap snapshot.
             if (!ra.escapePoints.isEmpty() && hasPostEscapeWrite(ra)) continue;
+            // Any P or L case would run <init> twice: once inlined at the
+            // alloc site and once at a materialization site. That's fine
+            // iff <init> only writes this's fields — any other side effect
+            // (static updates, non-super method calls, new expressions,
+            // throws) would double-execute. Restrict P/L to simple inits.
+            boolean wouldBePartial =
+                !ra.escapePoints.isEmpty() || ra.hasCalleeMaterialization;
+            if (wouldBePartial && !isSimpleInitChain(ra.initChain)) continue;
             populateChainFields(ra);
             r.add(ra);
         }
         return r;
+    }
+
+    /**
+     * True iff every constructor in the chain only performs direct
+     * {@code this.f = ...} stores, super/delegated {@code <init>} calls,
+     * local arithmetic/copies, and control flow over simple values. Any
+     * static-field access, non-super invoke, {@code new} expression, or
+     * throw in the chain makes it unsafe for P/L transformation because
+     * we'd double-execute those side effects.
+     */
+    private boolean isSimpleInitChain(List<SootMethod> chain) {
+        for (SootMethod c : chain) {
+            if (c.getDeclaringClass().getName().equals("java.lang.Object")
+                    && c.getName().equals("<init>")) continue;
+            if (!c.isConcrete()) return false;
+            if (!isSimpleInitBody(c)) return false;
+        }
+        return true;
+    }
+
+    private boolean isSimpleInitBody(SootMethod ctor) {
+        Body b = ctor.getActiveBody();
+        Local thisLocal = b.getThisLocal();
+        for (Unit u : b.getUnits()) {
+            Stmt s = (Stmt) u;
+            if (s instanceof IdentityStmt) continue;
+            if (s instanceof ReturnVoidStmt) continue;
+            if (s instanceof GotoStmt) continue;
+            if (s instanceof IfStmt) {
+                if (!isSimpleValue(((IfStmt) s).getCondition(), thisLocal)) return false;
+                continue;
+            }
+            if (s instanceof InvokeStmt) {
+                InvokeExpr inv = ((InvokeStmt) s).getInvokeExpr();
+                // Allow super/delegated <init> on this.
+                if (inv instanceof SpecialInvokeExpr
+                        && inv.getMethodRef().name().equals("<init>")
+                        && ((SpecialInvokeExpr) inv).getBase().equals(thisLocal)) continue;
+                return false;
+            }
+            if (s instanceof AssignStmt) {
+                AssignStmt a = (AssignStmt) s;
+                if (!isSimpleLhs(a.getLeftOp(), thisLocal)) return false;
+                if (!isSimpleValue(a.getRightOp(), thisLocal)) return false;
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    private boolean isSimpleLhs(Value v, Local thisLocal) {
+        if (v instanceof Local) return true;
+        if (v instanceof InstanceFieldRef)
+            return ((InstanceFieldRef) v).getBase().equals(thisLocal);
+        return false;  // static/array writes disqualify
+    }
+
+    private boolean isSimpleValue(Value v, Local thisLocal) {
+        if (v instanceof Constant) return true;
+        if (v instanceof Local) return true;
+        if (v instanceof InstanceFieldRef)
+            return ((InstanceFieldRef) v).getBase().equals(thisLocal);
+        if (v instanceof BinopExpr) {
+            BinopExpr b = (BinopExpr) v;
+            return isSimpleValue(b.getOp1(), thisLocal)
+                && isSimpleValue(b.getOp2(), thisLocal);
+        }
+        if (v instanceof UnopExpr)
+            return isSimpleValue(((UnopExpr) v).getOp(), thisLocal);
+        if (v instanceof CastExpr)
+            return isSimpleValue(((CastExpr) v).getOp(), thisLocal);
+        return false;  // static refs, new, invoke, array ref → unsafe
     }
 
     /**
