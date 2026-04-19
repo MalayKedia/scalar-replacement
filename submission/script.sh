@@ -1,18 +1,5 @@
 #!/usr/bin/env bash
-#
-# PA4 entry-point script.
-#
-# 1. Cleans build + per-testcase class directories.
-# 2. Compiles the optimizer: javac -cp <soot.jar> src/Main.java
-#    (javac implicitly compiles the rest of src/ as dependencies.)
-# 3. For each tests/TestN.java:
-#      a. Compiles the testcase into out/TestN/base/.
-#      b. Invokes Main to emit optimized .class files into out/TestN/opt/.
-#      c. Runs both base and opt under -Xint, averaging wall-clock time
-#         over several iterations.
-#      d. Reports base ms, opt ms, speedup %, and the per-allocation
-#         Y/P/L breakdown from our analyzer.
-#
+
 # Y = pure scalar replacement (no materialization anywhere)
 # P = partial escape, materialize in current method body
 # L = partial escape, materialize inside specialized callee body
@@ -20,14 +7,12 @@
 set -eu
 cd "$(dirname "$0")"
 
-# ---------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------
-SOOT_JAR="soot-4.6.0-jar-with-dependencies.jar"
+SOOT_JAR="${SOOT_JAR:-soot-4.6.0-jar-with-dependencies.jar}"
 SRC_DIR="src"
 BUILD_DIR="build"
 TESTS_DIR="tests"
-OUT_ROOT="out"
+OUT_DIR="out"
+
 ITERATIONS="${ITERATIONS:-5}"
 JVM_FLAGS="-Xint"
 
@@ -36,24 +21,16 @@ if [ ! -f "$SOOT_JAR" ]; then
     exit 1
 fi
 
-# ---------------------------------------------------------------
-# Step 1: Clean everything
-# ---------------------------------------------------------------
-rm -rf "$BUILD_DIR" "$OUT_ROOT"
+# Clean everything
+rm -rf "$BUILD_DIR" "$OUT_DIR"
 find "$SRC_DIR" "$TESTS_DIR" -name "*.class" -delete 2>/dev/null || true
 
-# ---------------------------------------------------------------
-# Step 2: Compile the optimizer
-# ---------------------------------------------------------------
-echo "== Compiling optimizer =="
+# Compile out code
 mkdir -p "$BUILD_DIR"
-# -sourcepath lets javac pick up the other src/*.java files that Main.java references.
 javac -cp "$SOOT_JAR" -sourcepath "$SRC_DIR" -d "$BUILD_DIR" "$SRC_DIR"/Main.java
 
-# ---------------------------------------------------------------
-# Step 3: Run each testcase
-# ---------------------------------------------------------------
-mkdir -p "$OUT_ROOT"
+# Run each testcase
+mkdir -p "$OUT_DIR"
 
 printf "\n%-8s %10s %10s %10s %7s %8s\n" \
     "Test" "base(ms)" "opt(ms)" "speedup" "allocs" "Y/P/L"
@@ -62,8 +39,8 @@ echo "-----------------------------------------------------------------"
 for src in "$TESTS_DIR"/Test*.java; do
     [ -f "$src" ] || continue
     name=$(basename "$src" .java)
-    base_dir="$OUT_ROOT/$name/base"
-    opt_dir="$OUT_ROOT/$name/opt"
+    base_dir="$OUT_DIR/$name/base"
+    opt_dir="$OUT_DIR/$name/opt"
     mkdir -p "$base_dir" "$opt_dir"
 
     # a. Compile testcase
@@ -127,4 +104,4 @@ for src in "$TESTS_DIR"/Test*.java; do
 done
 
 echo
-echo "Output .class files: $OUT_ROOT/<test>/opt/"
+echo "Output .class files: $OUT_DIR/<test>/opt/"
