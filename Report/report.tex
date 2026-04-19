@@ -7,8 +7,8 @@
 \begin{document}
 \maketitle
 \section{What are we doing?}
-\subsection{Scalar replacement}
-Scalar replacement is an optimization technique where we replace an object with its individual fields and also convert any function calls with that object as the reciever to static calls. This is done to reduce the number of Heap accesses and allocations, which are expensive operations. But this optimization is a per object optimization which is only possible under very specific conditions.These conditions are 
+\textbf{Scalar replacement}\\
+Scalar replacement is an optimization technique where we replace an object with its individual fields and also convert any function calls with that object as the reciever to static calls. This is done to reduce the number of heap accesses and allocations, which are expensive operations. But this optimization is a per object optimization which is only possible under very specific conditions.These conditions are 
 \begin{itemize}
     \item there is no instance in which there is a local variable which may point to this object and some other object.
     \item there is no instance in which there is a global variable which may point to this object.
@@ -57,6 +57,37 @@ the call (good callee with empty modified-field set — we'll specialize it
 later) or disqualify the alloc. Identity use, heap-store on the alloc's
 ref, ambiguous aliasing (the local may refer to multiple allocations), and
 passing to a mutating callee are disqualifiers.
+
+\subsection{Pointer analysis: dimensions of precision}
+
+Both passes are may-alias forward dataflow analyses. Our analysis is Flow-sensitive, Path-insensitive and Context-insensitive. Beyond that, some other features of our analysis are:
+
+\begin{itemize}
+    \item \textbf{Interprocedural via method summaries}: at a call site
+    the forward dataflow queries the callee's previously-computed
+    \texttt{MethodSummary} to decide how the call affects the caller's
+    aliases.
+    \item \textbf{Field-sensitivity}: partial. \texttt{readFields} and
+    \texttt{modifiedFields} in \texttt{MethodSummary} track individual
+    \texttt{SootField}s, so we
+    know \emph{which} fields a callee reads vs.\ writes on a given
+    parameter. The abstract state itself, however, does not model the
+    heap: we do not track what's in $o.f$ for any abstract object $o$.
+    So Pass 1 is field-sensitive for reads and writes on
+    parameters but heap-insensitive for objects we don't control.
+
+    \item \textbf{Allocation-site sensitive}:In Pass 2
+    every \texttt{new} statement is its own abstract object, so two
+    \texttt{new X()} at different source lines in the same method are
+    distinct allocations with independent verdicts and independent
+    scalar expansions. Arrays are never tracked.
+
+    \item \textbf{Object-insensitive}: we don't refine summaries by
+    dynamic type and we don't do heap cloning. For virtual dispatch we
+    take the pessimistic union over all CHA/SPARK targets: a call is
+    specialisable only if \emph{every} possible concrete callee is
+    specialisable at that position.
+\end{itemize}
 
 \section{How do we transform the code?}
 
