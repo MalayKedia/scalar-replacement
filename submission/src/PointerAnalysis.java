@@ -367,7 +367,7 @@ public class PointerAnalysis extends ForwardFlowAnalysis<Unit, AnalysisState> {
         if (!method.getName().equals("<init>")) return false;
         InvokeExpr invoke = stmt.getInvokeExpr();
         if (!(invoke instanceof SpecialInvokeExpr)) return false;
-        if (!invoke.getMethodRef().name().equals("<init>")) return false;
+        if (!invoke.getMethodRef().getName().equals("<init>")) return false;
         Value base = ((SpecialInvokeExpr) invoke).getBase();
         return base instanceof Local && base.equals(body.getThisLocal());
     }

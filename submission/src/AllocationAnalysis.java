@@ -121,7 +121,7 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
                 InvokeExpr inv = ((InvokeStmt) s).getInvokeExpr();
                 // Allow super/delegated <init> on this.
                 if (inv instanceof SpecialInvokeExpr
-                        && inv.getMethodRef().name().equals("<init>")
+                        && inv.getMethodRef().getName().equals("<init>")
                         && ((SpecialInvokeExpr) inv).getBase().equals(thisLocal)) continue;
                 return false;
             }
@@ -372,7 +372,7 @@ public class AllocationAnalysis extends ForwardFlowAnalysis<Unit, AllocState> {
     private void handleInvoke(Stmt stmt, AllocState in) {
         InvokeExpr invoke = stmt.getInvokeExpr();
         boolean isInit = invoke instanceof SpecialInvokeExpr
-                      && invoke.getMethodRef().name().equals("<init>");
+                      && invoke.getMethodRef().getName().equals("<init>");
 
         List<Value> actuals = new ArrayList<>();
         boolean isInstance = invoke instanceof InstanceInvokeExpr;

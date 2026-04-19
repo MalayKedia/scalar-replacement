@@ -103,7 +103,7 @@ public class InitInliner {
             // super.<init>/this.<init> call — replace with next-level inlining.
             if (s.containsInvokeExpr()
                     && s.getInvokeExpr() instanceof SpecialInvokeExpr
-                    && s.getInvokeExpr().getMethodRef().name().equals("<init>")) {
+                    && s.getInvokeExpr().getMethodRef().getName().equals("<init>")) {
                 SpecialInvokeExpr si = (SpecialInvokeExpr) s.getInvokeExpr();
                 if (si.getBase() instanceof Local
                         && thisAliases.contains(si.getBase())) {
